@@ -557,19 +557,19 @@ class TornIntel:
             print(output)
 
         elif report_type == "oc_item_audit":
-            output = report.item_audit()
+            output = report.item_audit(faction=kwargs.get("faction"))
             print(output)
 
         elif report_type == "oc_cpr":
-            output = report.cpr_report()
+            output = report.cpr_report(faction=kwargs.get("faction"))
             print(output)
 
         elif report_type == "oc_outside":
-            output = report.outside_members_report(limit=kwargs.get("limit", 200))
+            output = report.outside_members_report(limit=kwargs.get("limit", 200), faction=kwargs.get("faction"))
             print(output)
 
         elif report_type == "oc_delays":
-            output = report.delay_report(limit=kwargs.get("limit", 50))
+            output = report.delay_report(limit=kwargs.get("limit", 50), faction=kwargs.get("faction"))
             print(output)
 
         else:

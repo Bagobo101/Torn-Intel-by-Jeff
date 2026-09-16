@@ -2,7 +2,7 @@
 // @name         Torn OC CRP Fit
 // @namespace    http://tampermonkey.net/
 // @author       JeffBezas
-// @version      1.6.0
+// @version      1.6.2
 // @description  Highlights the organised crime slots that best fit your CPR, using the faction CRP/weight table.
 // @match        https://www.torn.com/factions.php*
 // @grant        GM_registerMenuCommand
@@ -332,6 +332,27 @@
     return /\bjoin\b|empty|available/i.test(slot.textContent);
   }
 
+  function memberName(slot) {
+    const profile = slot.querySelector('a[href*="profiles.php"], a[href*="XID="]');
+    if (!profile) return null;
+
+    const honorText = Array.from(slot.querySelectorAll('.honor-text'))
+      .map(element => element.textContent.trim())
+      .find(Boolean);
+    if (honorText) return honorText;
+
+    const honorCharacters = Array.from(slot.querySelectorAll('.honor-text [data-char]'))
+      .map(element => element.getAttribute('data-char') || '')
+      .join('');
+    if (honorCharacters) return honorCharacters;
+
+    const honorImage = slot.querySelector('img[src*="/honors/"][alt]');
+    if (honorImage && honorImage.alt.trim()) return honorImage.alt.trim();
+
+    const name = profile.getAttribute('aria-label') || profile.getAttribute('title');
+    return name ? name.trim() : null;
+  }
+
   function positionOf(slot, crime) {
     for (const el of leafElements(slot)) {
       const key = basePosition(el.textContent);
@@ -382,7 +403,8 @@
         level,
         crimeUrl: crimeLink(card),
         cpr: readCpr(slot),
-        occupied: !isEmptySlot(slot)
+        occupied: !isEmptySlot(slot),
+        memberName: memberName(slot)
       });
     });
   }
@@ -427,7 +449,8 @@
           level,
           crimeUrl: crimeLink(card),
           cpr: readCpr(slot),
-          occupied: !isEmptySlot(slot)
+          occupied: !isEmptySlot(slot),
+          memberName: memberName(slot)
         });
       });
     });
@@ -521,7 +544,7 @@
     highlights = evaluated.map(entry => ({
       slot: entry.slot,
       kind: best[0] === entry ? 'crp-best' : entry.eligible ? 'crp-ok' : 'crp-low',
-      label: `${entry.role.position}\n${entry.occupied ? 'IN' : 'OPEN'} ${entry.cpr ?? '?'}/${entry.role.min_cpr} · w ${(entry.role.weight * 100).toFixed(1)}%`
+      label: `${entry.memberName || (entry.occupied ? 'OCCUPIED' : 'OPEN')}\n${entry.cpr ?? '?'}/${entry.role.min_cpr} · w ${(entry.role.weight * 100).toFixed(1)}%`
     }));
 
     drawHighlights();
@@ -545,7 +568,7 @@
             ? `<a href="${e.crimeUrl}">${e.crime.name}</a>`
             : e.crime.name;
           return `<li><b>${crimeName}</b> (L${e.level}) — ${e.role.position} ` +
-          `<span class="crp-muted">[${e.occupied ? 'occupied' : 'open'}]</span><br>` +
+          `<span class="crp-muted">[${e.memberName || (e.occupied ? 'occupied' : 'open')}]</span><br>` +
           `<span class="crp-muted">CPR ${e.cpr ?? '?'} / need ${e.role.min_cpr} · weight ${(e.role.weight * 100).toFixed(1)}%</span></li>`;
         }
       )
@@ -558,7 +581,7 @@
           ? `<a href="${entry.crimeUrl}">${entry.crime.name}</a>`
           : entry.crime.name;
         return `<li><b>${crimeName}</b> — ${entry.role.position} ` +
-          `<span class="crp-muted">[${entry.occupied ? 'occupied' : 'open'}; ` +
+          `<span class="crp-muted">[${entry.memberName || (entry.occupied ? 'occupied' : 'open')}; ` +
           `${entry.cpr ?? '?'} / ${entry.role.min_cpr}; ${entry.eligible ? 'meets CPR' : 'below CPR'}]</span></li>`;
       })
       .join('');

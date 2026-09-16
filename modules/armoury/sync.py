@@ -27,67 +27,77 @@ class ArmourySync(BaseSync):
         self.item_repo = ItemPriceRepository(self.database)
         self.armoury = services.armoury
         
-        # Ensure tables exist
+        # Ensure tables exist and missing columns are added
         schema = SchemaBuilder(self.database, self.logger)
-        if not self.database.table_exists(ArmouryNews.table_name):
-            schema.create(ArmouryNews)
-        if not self.database.table_exists(ItemPrice.table_name):
-            schema.create(ItemPrice)
+        schema.create(ArmouryNews)
+        schema.create(ItemPrice)
     
-    def sync(self, mode="backfill", filters=None, **kwargs):
+    def _resolve_faction_meta(self, faction=None):
+        settings = self.services.settings
+        if settings:
+            cfg = settings.get_faction(faction)
+            if cfg:
+                return cfg.faction_id, cfg.tag
+        return settings.faction_id if settings else None, "GTS"
+
+    def sync(self, mode="backfill", filters=None, faction=None, **kwargs):
         """
         Sync armoury news.
         
         Args:
             mode: 'backfill', 'live', or 'search'
             filters: Query filters (unused for now)
+            faction: Faction tag (e.g. GTS, GTH, all)
             **kwargs: Additional options (from_timestamp, to_timestamp)
         
         Returns:
             Count of events imported
         """
+        if str(faction or "").strip().lower() == "all":
+            total = 0
+            for f in self.services.settings.list_factions():
+                self.logger.info(f"Syncing armoury for faction {f.tag} ({f.name})...")
+                total += self._sync_one_faction(mode=mode, filters=filters, faction=f.tag, **kwargs)
+            return total
+
+        return self._sync_one_faction(mode=mode, filters=filters, faction=faction, **kwargs)
+
+    def _sync_one_faction(self, mode="backfill", filters=None, faction=None, **kwargs):
         if mode == "backfill":
             return self._backfill(
                 filters,
                 from_timestamp=kwargs.get("from_timestamp"),
                 to_timestamp=kwargs.get("to_timestamp"),
+                faction=faction,
             )
         elif mode == "live":
-            return self._live(filters)
+            return self._live(filters, faction=faction)
         elif mode == "search":
-            # Search handled by queries
             return 0
         
         return 0
     
-    def _backfill(self, filters, from_timestamp=None, to_timestamp=None):
+    def _backfill(self, filters, from_timestamp=None, to_timestamp=None, faction=None):
         """
         Backfill armoury news using timestamp-based pagination.
-        
-        Walks backward through all events, skipping those already synced.
-        Continues until the API is exhausted or the explicit timestamp
-        boundary is reached so older gaps are not missed.
-        
-        Returns:
-            Count of events imported
         """
-        faction_id = self.services.settings.faction_id
+        faction_id, faction_tag = self._resolve_faction_meta(faction)
         if not faction_id:
-            self.logger.error("TORN_FACTION_ID not set in config")
+            self.logger.error(f"TORN_FACTION_ID not set in config for faction {faction or 'default'}")
             return 0
         
-        self.logger.info(f"Armoury backfill starting for faction {faction_id}")
+        self.logger.info(f"Armoury backfill starting for faction {faction_tag} ({faction_id})")
         
         total = 0
 
-        checkpoint_key = "armoury_backfill"
+        checkpoint_key = f"armoury_backfill_{faction_tag}"
         start_to_timestamp = to_timestamp
         if start_to_timestamp is None:
             resume_to = self._get_resume_checkpoint(checkpoint_key)
             if resume_to is not None:
                 start_to_timestamp = int(resume_to)
                 self.logger.info(
-                    f"Resuming armoury backfill from checkpoint (to={start_to_timestamp})"
+                    f"Resuming armoury backfill [{faction_tag}] from checkpoint (to={start_to_timestamp})"
                 )
 
         # Seed resume anchor so failures before first fetched page still resume deterministically.
@@ -95,7 +105,7 @@ class ArmourySync(BaseSync):
         self._set_resume_checkpoint(
             checkpoint_key,
             initial_anchor,
-            note="initial armoury backfill anchor",
+            note=f"initial armoury backfill anchor {faction_tag}",
         )
 
         try:
@@ -105,6 +115,7 @@ class ArmourySync(BaseSync):
                 sort="DESC",
                 from_timestamp=from_timestamp,
                 to_timestamp=start_to_timestamp,
+                faction_tag=faction_tag,
             ):
                 if page:
                     next_to = min(int(p["timestamp"]) for p in page) - 1
@@ -112,7 +123,7 @@ class ArmourySync(BaseSync):
                         self._set_resume_checkpoint(
                             checkpoint_key,
                             next_to,
-                            note="auto-saved during armoury backfill",
+                            note=f"auto-saved during armoury backfill {faction_tag}",
                         )
 
                 for parsed in page:
@@ -132,21 +143,21 @@ class ArmourySync(BaseSync):
 
         except RateLimitError as exc:
             self.logger.warning(
-                f"Armoury backfill paused due to rate limit: {exc}"
+                f"Armoury backfill [{faction_tag}] paused due to rate limit: {exc}"
             )
             resume_to = self._get_resume_checkpoint(checkpoint_key)
             if resume_to is not None:
                 self.logger.info(
-                    f"Resume with: python main.py sync armoury --mode backfill --to {resume_to}"
+                    f"Resume with: python main.py sync armoury --mode backfill --to {resume_to} --faction {faction_tag}"
                 )
             return total
 
         self._clear_resume_checkpoint(checkpoint_key)
 
-        self.logger.info(f"Armoury backfill complete. Imported {total} events.")
+        self.logger.info(f"Armoury backfill [{faction_tag}] complete. Imported {total} events.")
         return total
     
-    def _live(self, filters):
+    def _live(self, filters, faction=None):
         """
         Sync only new armoury events.
         Picks up from last synced event timestamp.
@@ -154,13 +165,13 @@ class ArmourySync(BaseSync):
         Returns:
             Count of events imported
         """
-        faction_id = self.services.settings.faction_id
+        faction_id, faction_tag = self._resolve_faction_meta(faction)
         if not faction_id:
-            self.logger.error("TORN_FACTION_ID not set in config")
+            self.logger.error(f"TORN_FACTION_ID not set in config for faction {faction or 'default'}")
             return 0
         
-        # Get last synced timestamp
-        last_ts = self.repo.latest_timestamp()
+        # Get last synced timestamp for this faction
+        last_ts = self.repo.latest_timestamp(faction_id=faction_id, faction_tag=faction_tag)
         from_timestamp = None
         
         if last_ts is not None:
@@ -174,6 +185,7 @@ class ArmourySync(BaseSync):
             filters=filters,
             sort="ASC",  # Walk forward for live
             from_timestamp=from_timestamp,
+            faction_tag=faction_tag,
         ):
             for parsed in page:
                 event_id = parsed["event_id"]
@@ -189,7 +201,7 @@ class ArmourySync(BaseSync):
                 self._insert_event(parsed)
                 total += 1
         
-        self.logger.info(f"Armoury live sync complete. Imported {total} events.")
+        self.logger.info(f"Armoury live sync [{faction_tag}] complete. Imported {total} events.")
         return total
     
     def _get_item_price(self, item_id, item_name):
@@ -206,13 +218,15 @@ class ArmourySync(BaseSync):
         """Insert parsed event into database"""
         sql = """
             INSERT OR IGNORE INTO armoury_news 
-            (event_id, timestamp, player_id, player_name, event_type, item_id, item_name, 
+            (event_id, faction_id, faction_tag, timestamp, player_id, player_name, event_type, item_id, item_name, 
              item_category, quantity, description, raw_news, item_price, price_source)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
         
         self.database.execute(sql, (
             parsed_event["event_id"],
+            parsed_event.get("faction_id"),
+            parsed_event.get("faction_tag"),
             parsed_event["timestamp"],
             parsed_event["player_id"],
             parsed_event["player_name"],

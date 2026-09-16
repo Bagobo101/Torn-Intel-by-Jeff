@@ -10,7 +10,7 @@ class RateLimitError(Exception):
 
 class HttpClient:
     """
-    HTTP client with retry logic and rate limit handling.
+    HTTP client with retry logic, rate limit handling, and multi-key failover.
     Works with ApiKeyManager to handle multiple keys and exponential backoff.
     """
 
@@ -21,15 +21,16 @@ class HttpClient:
 
     ##################################################
 
-    def get(self, url, params=None, max_retries=5, retry_backoff_base=2):
+    def get(self, url, params=None, max_retries=5, retry_backoff_base=2, pool="default"):
         """
-        Make a GET request with automatic retry on rate limits.
+        Make a GET request with automatic retry and multi-key rotation on rate limits / errors.
         
         Args:
             url: URL to request
             params: Query parameters (should include 'key')
             max_retries: Max retry attempts
             retry_backoff_base: Base for exponential backoff
+            pool: Key pool name to rotate within
             
         Returns:
             JSON response
@@ -39,12 +40,14 @@ class HttpClient:
             requests.HTTPError: For other HTTP errors
         """
         attempt = 0
+        params = dict(params or {})
         
         retry_schedule = [10, 20, 30, 60]
         if self.key_manager and hasattr(self.key_manager.settings, "rate_limit_retry_schedule"):
             retry_schedule = self.key_manager.settings.rate_limit_retry_schedule
 
         while attempt < max_retries:
+            current_key = params.get("key")
             try:
                 response = self.session.get(
                     url,
@@ -68,53 +71,73 @@ class HttpClient:
                             wait_seconds = int(wait_match.group(1))
 
                         attempt += 1
+                        idx = min(attempt - 1, len(retry_schedule) - 1)
+                        backoff = wait_seconds or retry_schedule[idx]
+
+                        if self.key_manager and current_key:
+                            self.key_manager.record_rate_limit(current_key, wait_seconds=backoff)
+
                         if attempt >= max_retries:
                             raise RateLimitError(
                                 f"Rate limited after {max_retries} attempts: {error_msg}"
                             )
 
-                        # Fixed escalating backoff tuned for heavier backfill runs.
-                        if wait_seconds:
-                            backoff = wait_seconds
-                        else:
-                            idx = min(attempt - 1, len(retry_schedule) - 1)
-                            backoff = retry_schedule[idx]
-                        if self.key_manager and params and params.get("key"):
-                            self.key_manager.record_rate_limit(params["key"], wait_seconds=backoff)
+                        # If key manager has another available key in the pool, fail over immediately!
+                        if self.key_manager and self.key_manager.has_available_key(pool=pool):
+                            next_key = self.key_manager.get_next_key(pool=pool, skip_rate_limited=True)
+                            if next_key != current_key:
+                                params["key"] = next_key
+                                continue
+
+                        # All keys in pool are limited, wait as last resort
                         print(
-                            f"Rate limit (code {error_code}), backing off {backoff}s "
+                            f"Rate limit (code {error_code}) on all pool keys, backing off {backoff}s "
                             f"(attempt {attempt}/{max_retries})"
                         )
                         time.sleep(backoff)
                         continue
                     
-                    # Other Torn API errors - don't retry
+                    # Other Torn API errors - record failure and return
+                    if self.key_manager and current_key:
+                        self.key_manager.record_failure(current_key, error_code=error_code)
                     return data
                 
                 # Success
-                if self.key_manager and params.get("key"):
-                    self.key_manager.record_success(params["key"])
+                if self.key_manager and current_key:
+                    self.key_manager.record_success(current_key)
                 
                 return data
                 
             except requests.exceptions.Timeout:
                 attempt += 1
-                if self.key_manager and params and params.get("key"):
-                    self.key_manager.record_failure(params["key"])
+                if self.key_manager and current_key:
+                    self.key_manager.record_failure(current_key)
                 if attempt >= max_retries:
                     raise
                 
+                if self.key_manager and self.key_manager.has_available_key(pool=pool):
+                    next_key = self.key_manager.get_next_key(pool=pool, skip_rate_limited=True)
+                    if next_key != current_key:
+                        params["key"] = next_key
+                        continue
+
                 backoff = retry_backoff_base ** attempt
                 print(f"Timeout, backing off {backoff}s (attempt {attempt}/{max_retries})")
                 time.sleep(backoff)
                 
             except requests.exceptions.RequestException as e:
                 attempt += 1
-                if self.key_manager and params and params.get("key"):
-                    self.key_manager.record_failure(params["key"])
+                if self.key_manager and current_key:
+                    self.key_manager.record_failure(current_key)
                 if attempt >= max_retries:
                     raise
                 
+                if self.key_manager and self.key_manager.has_available_key(pool=pool):
+                    next_key = self.key_manager.get_next_key(pool=pool, skip_rate_limited=True)
+                    if next_key != current_key:
+                        params["key"] = next_key
+                        continue
+
                 backoff = retry_backoff_base ** attempt
                 print(f"Request error: {e}, backing off {backoff}s (attempt {attempt}/{max_retries})")
                 time.sleep(backoff)

@@ -37,6 +37,7 @@ class RankedWar(Model):
     
     our_faction_id = Integer()
     our_faction_name = Text()
+    faction_tag = Text()
     
     opponent_faction_id = Integer()
     opponent_faction_name = Text()

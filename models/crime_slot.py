@@ -11,6 +11,10 @@ class CrimeSlot(Model):
 
     crime_id = Integer()
 
+    faction_id = Integer()
+
+    faction_tag = Text()
+
     crime_name = Text()
 
     status = Text()
@@ -54,6 +58,10 @@ class CrimeCprStat(Model):
 
     user_id = Integer()
 
+    faction_id = Integer()
+
+    faction_tag = Text()
+
     user_name = Text()
 
     crime_level = Integer()
@@ -82,6 +90,10 @@ class CrimeMember(Model):
     table_name = "crime_members"
 
     user_id = Integer(primary=True)
+
+    faction_id = Integer()
+
+    faction_tag = Text()
 
     user_name = Text()
 
@@ -115,6 +127,10 @@ class CrimeSlotHistory(Model):
     history_key = Text(primary=True)
 
     crime_id = Integer()
+
+    faction_id = Integer()
+
+    faction_tag = Text()
 
     crime_name = Text()
 
@@ -154,6 +170,10 @@ class CrimeDelayEvent(Model):
     delay_id = Integer(primary=True)
 
     crime_id = Integer()
+
+    faction_id = Integer()
+
+    faction_tag = Text()
 
     crime_name = Text()
 
@@ -199,6 +219,10 @@ class CrimeDelayNotification(Model):
     delay_id = Integer()
 
     crime_id = Integer()
+
+    faction_id = Integer()
+
+    faction_tag = Text()
 
     crime_name = Text()
 

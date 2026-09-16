@@ -15,8 +15,23 @@ class CrimeQueries:
 
     #######################################################
 
-    def active_slots(self):
-        return [dict(r) for r in self.repo.active_slots()]
+    def active_slots(self, faction=None):
+        return [dict(r) for r in self.repo.active_slots(faction_tag=faction)]
+
+    #######################################################
+
+    def cpr_stats(self, min_cpr=None, faction=None):
+        return [dict(r) for r in self.repo.cpr_stats(min_cpr=min_cpr, faction_tag=faction)]
+
+    #######################################################
+
+    def members(self, faction=None):
+        return [dict(r) for r in self.repo.members(faction_tag=faction)]
+
+    #######################################################
+
+    def members_outside_crimes(self, faction=None):
+        return [dict(r) for r in self.repo.members_outside_crimes(faction_tag=faction)]
 
     #######################################################
 
@@ -81,11 +96,6 @@ class CrimeQueries:
 
     #######################################################
 
-    def cpr_stats(self, min_cpr=None):
-        return [dict(r) for r in self.repo.cpr_stats(min_cpr=min_cpr)]
-
-    #######################################################
-
     def outstanding_loans(self):
         """
         Outstanding qty per player/item from armoury loaned/received history.
@@ -117,16 +127,6 @@ class CrimeQueries:
             """
         )
         return [dict(r) for r in rows]
-
-    #######################################################
-
-    def members_outside_crimes(self):
-        return [dict(r) for r in self.repo.members_outside_crimes()]
-
-    #######################################################
-
-    def members(self):
-        return [dict(r) for r in self.repo.members()]
 
     #######################################################
 
@@ -248,13 +248,13 @@ class CrimeQueries:
 
     #######################################################
 
-    def active_delay_events(self, limit=50):
-        return [dict(r) for r in self.repo.active_delay_events(limit=limit)]
+    def active_delay_events(self, limit=50, faction=None):
+        return [dict(r) for r in self.repo.active_delay_events(limit=limit, faction_tag=faction)]
 
     #######################################################
 
-    def resolved_delay_events(self, limit=50):
-        return [dict(r) for r in self.repo.resolved_delay_events(limit=limit)]
+    def resolved_delay_events(self, limit=50, faction=None):
+        return [dict(r) for r in self.repo.resolved_delay_events(limit=limit, faction_tag=faction)]
 
     #######################################################
 

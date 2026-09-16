@@ -27,6 +27,7 @@ class CLI:
                     event_type=getattr(args, 'event_type', None),
                     limit=args.limit,
                     oldest_first=args.oldest,
+                    faction=getattr(args, 'faction', None),
                 )
 
             else:
@@ -38,6 +39,7 @@ class CLI:
                     from_timestamp=args.from_timestamp,
                     to_timestamp=args.to_timestamp,
                     pages=getattr(args, 'pages', 50),
+                    faction=getattr(args, 'faction', None),
                 )
 
         elif args.command == "report":
@@ -61,6 +63,7 @@ class CLI:
                 pay_outside_hits=getattr(args, 'pay_outside_hits', 0),
                 stacking_days=getattr(args, 'stacking_days', 0),
                 temp_return_days=getattr(args, 'temp_return_days', 2),
+                faction=getattr(args, 'faction', None),
             )
 
         elif args.command == "crime_rules":

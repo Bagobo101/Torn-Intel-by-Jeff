@@ -23,31 +23,35 @@ class CrimeSync(BaseSync):
         self.repo = CrimeSlotRepository(services.database)
 
         schema = SchemaBuilder(services.database, services.logger)
-        if not services.database.table_exists(CrimeSlot.table_name):
-            schema.create(CrimeSlot)
-        if not services.database.table_exists(CrimeCprStat.table_name):
-            schema.create(CrimeCprStat)
-        if not services.database.table_exists(CrimeMember.table_name):
-            schema.create(CrimeMember)
-        if not services.database.table_exists(CrimeSlotHistory.table_name):
-            schema.create(CrimeSlotHistory)
-        if not services.database.table_exists(CrimeDelayEvent.table_name):
-            schema.create(CrimeDelayEvent)
-        if not services.database.table_exists(CrimeDelayNotification.table_name):
-            schema.create(CrimeDelayNotification)
+        schema.create(CrimeSlot)
+        schema.create(CrimeCprStat)
+        schema.create(CrimeMember)
+        schema.create(CrimeSlotHistory)
+        schema.create(CrimeDelayEvent)
+        schema.create(CrimeDelayNotification)
 
         self._ensure_member_columns()
 
     #######################################################
 
-    def sync(self, mode="backfill", filters=None, **kwargs):
+    def sync(self, mode="backfill", filters=None, faction=None, **kwargs):
+
+        if str(faction or "").strip().lower() == "all":
+            total = 0
+            for f in self.services.settings.list_factions():
+                self.logger.info(f"Syncing crimes for faction {f.tag} ({f.name})...")
+                total += self._sync_one_faction(mode=mode, faction=f.tag, pages=kwargs.get("pages", 50))
+            return total
+
+        return self._sync_one_faction(mode=mode, faction=faction, pages=kwargs.get("pages", 50))
+
+    def _sync_one_faction(self, mode="backfill", faction=None, pages=50):
 
         if mode == "live":
-            return self._sync_snapshot()
+            return self._sync_snapshot(faction=faction)
 
         if mode == "backfill":
-            pages = kwargs.get("pages", 50)
-            return self._backfill(pages=pages)
+            return self._backfill(pages=pages, faction=faction)
 
         raise ValueError(
             f"Unknown sync mode for crimes: '{mode}'"
@@ -55,25 +59,33 @@ class CrimeSync(BaseSync):
 
     #######################################################
 
-    def _sync_snapshot(self):
+    def _sync_snapshot(self, faction=None):
 
-        snapshot = self.crimes.fetch_snapshot()
+        snapshot = self.crimes.fetch_snapshot(faction=faction)
+        if not snapshot.get("ok", True) or not snapshot.get("members"):
+            self.logger.warning(f"Crimes snapshot sync skipped for {faction or 'default'}: incomplete or invalid snapshot from Torn API")
+            return 0
+
+        faction_tag = snapshot.get("faction_tag")
+        faction_id = snapshot.get("faction_id")
         members = snapshot["members"]
         slots = snapshot["active_slots"]
         cpr_rows = snapshot["cpr_rows"]
 
-        self.repo.replace_members(members)
-        self.repo.replace_active_slots(slots)
-        self.repo.insert_history_slots(slots)
-        self.repo.upsert_cpr_stats(cpr_rows)
+        self.repo.replace_members(members, faction_tag=faction_tag, faction_id=faction_id)
+        self.repo.replace_active_slots(slots, faction_tag=faction_tag, faction_id=faction_id)
+        self.repo.insert_history_slots(slots, faction_tag=faction_tag, faction_id=faction_id)
+        self.repo.upsert_cpr_stats(cpr_rows, faction_tag=faction_tag, faction_id=faction_id)
         delay_summary = self.repo.track_flying_delays(
             slots,
             members,
             crime_status_rows=snapshot.get("crime_status_rows") or [],
+            faction_tag=faction_tag,
+            faction_id=faction_id,
         )
 
         self.logger.info(
-            f"Crimes snapshot synced: {len(members)} members, {len(slots)} active slots, {len(cpr_rows)} CPR rows, "
+            f"Crimes snapshot synced [{faction_tag}]: {len(members)} members, {len(slots)} active slots, {len(cpr_rows)} CPR rows, "
             f"{delay_summary.get('active', 0)} active flying delays, "
             f"{delay_summary.get('started', 0)} started, {delay_summary.get('resolved', 0)} resolved"
         )
@@ -82,30 +94,38 @@ class CrimeSync(BaseSync):
 
     #######################################################
 
-    def _backfill(self, pages=50):
+    def _backfill(self, pages=50, faction=None):
 
-        snapshot = self.crimes.fetch_snapshot()
+        snapshot = self.crimes.fetch_snapshot(faction=faction)
+        if not snapshot.get("ok", True) or not snapshot.get("members"):
+            self.logger.warning(f"Crimes backfill sync skipped for {faction or 'default'}: incomplete or invalid snapshot from Torn API")
+            return 0
+
+        faction_tag = snapshot.get("faction_tag")
+        faction_id = snapshot.get("faction_id")
         members = snapshot["members"]
         active_slots = snapshot["active_slots"]
-        completed_slots = self.crimes.backfill_completed_slots(pages=pages)
+        completed_slots = self.crimes.backfill_completed_slots(pages=pages, faction=faction)
 
         all_cpr_rows = list(snapshot["cpr_rows"])
-        completed_cpr_rows = CrimeParser.parse_cpr_rows(completed_slots)
+        completed_cpr_rows = CrimeParser.parse_cpr_rows(completed_slots, faction_id=faction_id, faction_tag=faction_tag)
         all_cpr_rows.extend(completed_cpr_rows)
 
-        self.repo.replace_members(members)
-        self.repo.replace_active_slots(active_slots)
-        self.repo.insert_history_slots(active_slots)
-        self.repo.insert_history_slots(completed_slots)
-        self.repo.upsert_cpr_stats(all_cpr_rows)
+        self.repo.replace_members(members, faction_tag=faction_tag, faction_id=faction_id)
+        self.repo.replace_active_slots(active_slots, faction_tag=faction_tag, faction_id=faction_id)
+        self.repo.insert_history_slots(active_slots, faction_tag=faction_tag, faction_id=faction_id)
+        self.repo.insert_history_slots(completed_slots, faction_tag=faction_tag, faction_id=faction_id)
+        self.repo.upsert_cpr_stats(all_cpr_rows, faction_tag=faction_tag, faction_id=faction_id)
         self.repo.track_flying_delays(
             active_slots,
             members,
             crime_status_rows=snapshot.get("crime_status_rows") or [],
+            faction_tag=faction_tag,
+            faction_id=faction_id,
         )
 
         self.logger.info(
-            "Crimes backfill synced: "
+            f"Crimes backfill synced [{faction_tag}]: "
             f"{len(members)} members, {len(active_slots)} active slots, "
             f"{len(completed_slots)} completed slots scanned, {len(all_cpr_rows)} CPR rows upserted"
         )

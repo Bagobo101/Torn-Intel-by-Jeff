@@ -47,7 +47,7 @@ class ArmouryQueries:
         """Get total cost for item category within optional timeframe"""
         return self.repo.total_cost_by_category(item_category, from_timestamp, to_timestamp)
     
-    def search(self, player_name=None, item_name=None, category=None, event_type=None, limit=25, order="DESC"):
+    def search(self, player_name=None, item_name=None, category=None, event_type=None, limit=25, order="DESC", faction=None):
         """
         Search armoury events with flexible filtering.
         
@@ -58,6 +58,7 @@ class ArmouryQueries:
             event_type: Filter by event type (used, deposited, filled, etc.)
             limit: Max results to return
             order: ASC or DESC for sort order
+            faction: Faction tag (e.g. GTS, GTH)
         
         Returns:
             List of matching armoury events
@@ -65,6 +66,10 @@ class ArmouryQueries:
         filters = []
         params = []
         
+        if faction:
+            filters.append("n.faction_tag = ?")
+            params.append(str(faction).upper())
+
         if player_name:
             filters.append("LOWER(n.player_name) LIKE LOWER(?)")
             params.append(f"%{player_name}%")

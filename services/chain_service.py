@@ -15,13 +15,13 @@ class ChainService:
 
     #######################################################
 
-    def iter_pages(self):
+    def iter_pages(self, faction_tag=None):
         """
         Yield parsed chains from the API.
         Chains endpoint returns all chains in one response,
         but we follow the pattern for consistency.
         """
-        response = self.gateway.faction_chains()
+        response = self.gateway.faction_chains(pool=faction_tag or "default")
 
         chains = self._parse_all(response)
 

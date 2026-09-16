@@ -21,12 +21,21 @@ class ArmouryGateway:
         self.torn_url = "https://api.torn.com/torn/"
         self.torn_v2_url = "https://api.torn.com/v2/torn/"
 
-    def get_torn_items(self):
+    def _resolve_pool(self, faction_id=None, pool=None):
+        if pool and pool != "default":
+            return pool
+        if faction_id and self.settings:
+            faction = self.settings.get_faction(faction_id)
+            if faction:
+                return faction.tag
+        return "default"
+
+    def get_torn_items(self, pool="GLOBAL"):
         """Fetch Torn item catalogue (v1 torn/items) for name/type lookups."""
         params = {"selections": "items"}
 
         if self.key_manager:
-            api_key = self.key_manager.get_next_key(skip_rate_limited=True)
+            api_key = self.key_manager.get_next_key(pool=pool, skip_rate_limited=True)
         elif self.settings:
             api_key = self.settings.api_key
         else:
@@ -35,13 +44,13 @@ class ArmouryGateway:
         if api_key:
             params["key"] = api_key
 
-        response = self.http.get(self.torn_url, params=params)
+        response = self.http.get(self.torn_url, params=params, pool=pool)
         if not response or "error" in response:
             return {}
 
         return response.get("items", {})
     
-    def get_armoury_news(self, faction_id, limit=100, to_timestamp=None):
+    def get_armoury_news(self, faction_id, limit=100, to_timestamp=None, pool=None):
         """
         Fetch armoury news events for a faction.
         
@@ -53,6 +62,7 @@ class ArmouryGateway:
         Returns:
             Dict mapping event_id to event data
         """
+        pool_name = self._resolve_pool(faction_id, pool)
         base_params = {
             "selections": "armorynews",
             "limit": limit,
@@ -62,9 +72,8 @@ class ArmouryGateway:
 
         url = f"{self.faction_url}{faction_id}"
 
-        attempts = 1
-        if self.key_manager and getattr(self.key_manager, "api_keys", None):
-            attempts = max(1, len(self.key_manager.api_keys))
+        pool_keys = self.key_manager.get_pool_keys(pool=pool_name) if self.key_manager else []
+        attempts = max(1, len(pool_keys)) if pool_keys else 1
 
         last_error = None
 
@@ -72,7 +81,7 @@ class ArmouryGateway:
             params = dict(base_params)
 
             if self.key_manager:
-                api_key = self.key_manager.get_next_key(skip_rate_limited=True)
+                api_key = self.key_manager.get_next_key(pool=pool_name, skip_rate_limited=True)
             elif self.settings:
                 api_key = self.settings.api_key
             else:
@@ -81,7 +90,7 @@ class ArmouryGateway:
             if api_key:
                 params["key"] = api_key
 
-            response = self.http.get(url, params=params)
+            response = self.http.get(url, params=params, pool=pool_name)
 
             if not response:
                 continue
@@ -106,11 +115,10 @@ class ArmouryGateway:
                 return armorynews
 
         if last_error:
-            # Keep this lightweight; caller can continue gracefully.
             print(f"Armoury API error: {last_error}")
         return {}
     
-    def get_armoury_items(self, faction_id, category):
+    def get_armoury_items(self, faction_id, category, pool=None):
         """
         Get armoury items by category.
         
@@ -121,13 +129,14 @@ class ArmouryGateway:
         Returns:
             Dict with item information
         """
+        pool_name = self._resolve_pool(faction_id, pool)
         params = {
             "selections": category,
         }
         
         # Add API key
         if self.key_manager:
-            api_key = self.key_manager.get_next_key(skip_rate_limited=True)
+            api_key = self.key_manager.get_next_key(pool=pool_name, skip_rate_limited=True)
         elif self.settings:
             api_key = self.settings.api_key
         else:
@@ -137,7 +146,7 @@ class ArmouryGateway:
             params["key"] = api_key
         
         url = f"{self.faction_url}{faction_id}"
-        response = self.http.get(url, params=params)
+        response = self.http.get(url, params=params, pool=pool_name)
         
         if not response:
             return {}
@@ -317,7 +326,7 @@ class ArmouryGateway:
             if next_url:
                 time.sleep(0.5)  # Rate limit friendly
     
-    def page_by_timestamp(self, faction_id, from_timestamp=None, to_timestamp=None, limit=100):
+    def page_by_timestamp(self, faction_id, from_timestamp=None, to_timestamp=None, limit=100, pool=None):
         """
         Page through armoury news using timestamps as pagination anchors.
         
@@ -333,6 +342,7 @@ class ArmouryGateway:
         Yields:
             Tuple of (event_id, event_data, timestamp)
         """
+        pool_name = self._resolve_pool(faction_id, pool)
         current_to = to_timestamp  # Start from specified time or now
         
         while True:
@@ -345,7 +355,7 @@ class ArmouryGateway:
             
             # Add API key
             if self.key_manager:
-                api_key = self.key_manager.get_next_key(skip_rate_limited=True)
+                api_key = self.key_manager.get_next_key(pool=pool_name, skip_rate_limited=True)
             elif self.settings:
                 api_key = self.settings.api_key
             else:
@@ -355,7 +365,7 @@ class ArmouryGateway:
                 params["key"] = api_key
             
             url = f"{self.faction_url}{faction_id}"
-            response = self.http.get(url, params=params)
+            response = self.http.get(url, params=params, pool=pool_name)
             
             if not response or "armorynews" not in response:
                 break

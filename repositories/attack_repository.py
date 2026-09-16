@@ -24,14 +24,22 @@ class AttackRepository(Repository):
 
     ##########################################################
 
-    def latest_attack(self):
-
-        rows = self.db.select("""
-            SELECT attack_id
-            FROM attacks
-            ORDER BY attack_id DESC
-            LIMIT 1
-        """)
+    def latest_attack(self, faction_tag=None):
+        if faction_tag:
+            rows = self.db.select("""
+                SELECT attack_id
+                FROM attacks
+                WHERE faction_tag = ?
+                ORDER BY attack_id DESC
+                LIMIT 1
+            """, (faction_tag,))
+        else:
+            rows = self.db.select("""
+                SELECT attack_id
+                FROM attacks
+                ORDER BY attack_id DESC
+                LIMIT 1
+            """)
 
         if rows:
             return rows[0]["attack_id"]

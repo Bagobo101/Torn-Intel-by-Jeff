@@ -31,7 +31,7 @@ class TornGateway:
 
     #######################################################
 
-    def _request(self, url, params):
+    def _request(self, url, params, pool="default"):
 
         self.logger.info(f"GET {url}")
 
@@ -39,7 +39,8 @@ class TornGateway:
             url,
             params=params,
             max_retries=self.settings.max_retries,
-            retry_backoff_base=self.settings.retry_backoff_base
+            retry_backoff_base=self.settings.retry_backoff_base,
+            pool=pool,
         )
 
         time.sleep(self.settings.request_delay)
@@ -48,7 +49,7 @@ class TornGateway:
 
     #######################################################
 
-    def _get_v2(self, scope, selection, resource_id=None, **params):
+    def _get_v2(self, scope, selection, resource_id=None, pool="default", **params):
 
         segments = [self.settings.base_url, "v2", scope]
 
@@ -59,9 +60,9 @@ class TornGateway:
 
         url = "/".join(segments)
 
-        # Get the next available API key
+        # Get the next available API key for this pool
         if self.key_manager:
-            api_key = self.key_manager.get_next_key(skip_rate_limited=True)
+            api_key = self.key_manager.get_next_key(pool=pool, skip_rate_limited=True)
         else:
             api_key = self.settings.api_key
 
@@ -71,19 +72,19 @@ class TornGateway:
         }
         query.update({k: v for k, v in params.items() if v is not None})
 
-        return self._request(url, query)
+        return self._request(url, query, pool=pool)
 
     #######################################################
 
-    def _get_v1(self, scope, selection, resource_id=None, **params):
+    def _get_v1(self, scope, selection, resource_id=None, pool="default", **params):
 
         resource = f"{scope}/{resource_id}" if resource_id else scope
 
         url = f"{self.settings.base_url}/{resource}/"
 
-        # Get the next available API key
+        # Get the next available API key for this pool
         if self.key_manager:
-            api_key = self.key_manager.get_next_key(skip_rate_limited=True)
+            api_key = self.key_manager.get_next_key(pool=pool, skip_rate_limited=True)
         else:
             api_key = self.settings.api_key
 
@@ -94,13 +95,13 @@ class TornGateway:
         }
         query.update({k: v for k, v in params.items() if v is not None})
 
-        return self._request(url, query)
+        return self._request(url, query, pool=pool)
 
     #######################################################
 
-    def _get(self, scope, selection, resource_id=None, **params):
+    def _get(self, scope, selection, resource_id=None, pool="default", **params):
 
-        response = self._get_v2(scope, selection, resource_id, **params)
+        response = self._get_v2(scope, selection, resource_id, pool=pool, **params)
 
         if isinstance(response, dict) and response.get("error", {}).get("code") == V1_ONLY_ERROR_CODE:
 
@@ -108,7 +109,7 @@ class TornGateway:
                 f"{scope}/{selection} is v1-only, falling back"
             )
 
-            return self._get_v1(scope, selection, resource_id, **params)
+            return self._get_v1(scope, selection, resource_id, pool=pool, **params)
 
         return response
 
@@ -124,16 +125,17 @@ class TornGateway:
         from_timestamp=None,
         to_timestamp=None,
         timestamp=None,
+        pool="default",
     ):
         """
         Get faction attacks. Uses v1 API which supports the `to` parameter
-        for walking backwards through historical data. v1 has better
-        historical support than v2 for this endpoint.
+        for walking backwards through historical data.
         """
 
         return self._get_v1(
             "faction",
             "attacks",
+            pool=pool,
             filters=filters,
             limit=limit,
             sort=sort,
@@ -148,6 +150,7 @@ class TornGateway:
         from_timestamp=None,
         to_timestamp=None,
         timestamp=None,
+        pool="default",
     ):
         """
         Get faction revives from v1 API with attacks-style timestamp pagination.
@@ -156,6 +159,7 @@ class TornGateway:
         return self._get_v1(
             "faction",
             "revives",
+            pool=pool,
             limit=limit,
             sort=sort,
             **{"from": from_timestamp, "to": to_timestamp},
@@ -164,28 +168,31 @@ class TornGateway:
 
     #######################################################
 
-    def faction_chains(self):
+    def faction_chains(self, pool="default"):
 
         return self._get_v1(
             "faction",
             "chains",
+            pool=pool,
         )
 
-    def faction_basic(self):
+    def faction_basic(self, pool="default"):
 
         return self._get_v1(
             "faction",
             "basic",
+            pool=pool,
         )
 
-    def torn_items(self):
+    def torn_items(self, pool="GLOBAL"):
 
         return self._get_v1(
             "torn",
             "items",
+            pool=pool,
         )
 
-    def faction_crimes_v2(self, category="available,completed", offset=0, limit=100):
+    def faction_crimes_v2(self, category="available,completed", offset=0, limit=100, pool="default"):
         """
         Get faction OC 2.0 crimes with slot/item requirement data.
 
@@ -196,12 +203,13 @@ class TornGateway:
         return self._get_v2(
             "faction",
             "crimes",
+            pool=pool,
             cat=category,
             offset=offset,
             limit=limit,
         )
 
-    def faction_basic_crimes_members_v2(self, category="available,completed", offset=0, limit=100):
+    def faction_basic_crimes_members_v2(self, category="available,completed", offset=0, limit=100, pool="default"):
         """
         Combined v2 payload used by OC tooling scripts:
         faction/basic,crimes,members
@@ -210,13 +218,14 @@ class TornGateway:
         return self._get_v2(
             "faction",
             "basic,crimes,members",
+            pool=pool,
             cat=category,
             offset=offset,
             limit=limit,
             striptags="true",
         )
 
-    def faction_rankedwars(self):
+    def faction_rankedwars(self, pool="default"):
         """
         Get faction ranked wars metadata.
         Returns: {war_id: {factions: {...}, war: {start, end, target, winner}}}
@@ -225,9 +234,10 @@ class TornGateway:
         return self._get_v1(
             "faction",
             "rankedwars",
+            pool=pool,
         )
     
-    def market_items(self):
+    def market_items(self, pool="GLOBAL"):
         """
         Get all items with market pricing data.
         Uses v1 API which has market data endpoint.
@@ -238,8 +248,10 @@ class TornGateway:
         return self._get_v1(
             "market",
             "items",
+            pool=pool,
         )
     
-    def follow(self, url):
+    def follow(self, url, pool="default"):
 
-        return self._request(url, {"key": self.settings.api_key})
+        key = self.key_manager.get_next_key(pool=pool, skip_rate_limited=True) if self.key_manager else self.settings.api_key
+        return self._request(url, {"key": key}, pool=pool)

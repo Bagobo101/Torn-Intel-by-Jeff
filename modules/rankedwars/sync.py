@@ -39,34 +39,43 @@ class RankedWarsSync(BaseSync):
             settings=services.settings,
         )
         
-        # Ensure table exists
-        if not services.database.table_exists(RankedWar.table_name):
-            self.logger.info(f"Creating {RankedWar.table_name} table...")
-            SchemaBuilder(services.database, services.logger).create(RankedWar)
+        # Ensure table exists and columns are up to date
+        SchemaBuilder(services.database, services.logger).create(RankedWar)
     
-    def sync(self, mode="backfill", filters=None, **kwargs):
+    def sync(self, mode="backfill", filters=None, faction=None, **kwargs):
         """
         Sync ranked wars.
         
         Args:
             mode: Always 'backfill' for now (fetches all wars, upserts)
             filters: Ignored
+            faction: Faction tag (e.g. GTS, GTH, all)
             **kwargs: Other options (ignored)
         
         Returns:
             Count of wars inserted/updated
         """
-        
+        if str(faction or "").strip().lower() == "all":
+            total = 0
+            for f in self.services.settings.list_factions():
+                self.logger.info(f"Syncing ranked wars for faction {f.tag} ({f.name})...")
+                total += self._sync_one_faction(mode=mode, faction=f.tag, **kwargs)
+            return total
+
+        return self._sync_one_faction(mode=mode, faction=faction, **kwargs)
+
+    def _sync_one_faction(self, mode="backfill", faction=None, **kwargs):
         if mode != "backfill":
             self.logger.warning(f"Unknown mode '{mode}' for rankedwars; using backfill")
         
-        self.logger.info("=== RANKED WARS SYNC START ===")
+        faction_tag = faction or (self.services.settings.default_faction.tag if self.services.settings else "GTS")
+        self.logger.info(f"=== RANKED WARS SYNC START [{faction_tag}] ===")
         
-        wars = self.service.fetch_wars()
+        wars = self.service.fetch_wars(faction=faction)
         
         if not wars:
-            self.logger.info("No ranked wars to sync")
-            self.logger.info("=== RANKED WARS SYNC END ===")
+            self.logger.info(f"No ranked wars to sync [{faction_tag}]")
+            self.logger.info(f"=== RANKED WARS SYNC END [{faction_tag}] ===")
             return 0
         
         # Upsert each war
@@ -85,7 +94,7 @@ class RankedWarsSync(BaseSync):
                 # Update
                 self.db.execute(f"""
                     UPDATE {RankedWar.table_name}
-                    SET our_faction_id = ?, our_faction_name = ?,
+                    SET our_faction_id = ?, our_faction_name = ?, faction_tag = ?,
                         opponent_faction_id = ?, opponent_faction_name = ?,
                         our_score = ?, opponent_score = ?,
                         our_chain = ?, opponent_chain = ?,
@@ -94,7 +103,7 @@ class RankedWarsSync(BaseSync):
                         synced_at = ?
                     WHERE war_id = ?
                 """, (
-                    war.our_faction_id, war.our_faction_name,
+                    war.our_faction_id, war.our_faction_name, war.faction_tag or faction_tag,
                     war.opponent_faction_id, war.opponent_faction_name,
                     war.our_score, war.opponent_score,
                     war.our_chain, war.opponent_chain,
@@ -108,17 +117,17 @@ class RankedWarsSync(BaseSync):
                 # Insert
                 self.db.execute(f"""
                     INSERT INTO {RankedWar.table_name}
-                    (war_id, our_faction_id, our_faction_name,
+                    (war_id, our_faction_id, our_faction_name, faction_tag,
                      opponent_faction_id, opponent_faction_name,
                      our_score, opponent_score,
                      our_chain, opponent_chain,
                      war_start, war_end, war_target, war_winner_id,
                      chain_ids,
                      synced_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     war.war_id,
-                    war.our_faction_id, war.our_faction_name,
+                    war.our_faction_id, war.our_faction_name, war.faction_tag or faction_tag,
                     war.opponent_faction_id, war.opponent_faction_name,
                     war.our_score, war.opponent_score,
                     war.our_chain, war.opponent_chain,
@@ -132,8 +141,8 @@ class RankedWarsSync(BaseSync):
         self.db.commit()
         
         total = inserted + updated
-        self.logger.info(f"Inserted {inserted}, updated {updated} ranked wars")
-        self.logger.info("=== RANKED WARS SYNC END ===")
+        self.logger.info(f"Inserted {inserted}, updated {updated} ranked wars [{faction_tag}]")
+        self.logger.info(f"=== RANKED WARS SYNC END [{faction_tag}] ===")
         
         return total
     

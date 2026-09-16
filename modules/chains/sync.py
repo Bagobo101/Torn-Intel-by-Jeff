@@ -22,23 +22,40 @@ class ChainSync(BaseSync):
 
         self.repo = ChainRepository(services.database)
 
-        if not services.database.table_exists(Chain.table_name):
-
-            SchemaBuilder(
-                services.database,
-                services.logger
-            ).create(Chain)
+        SchemaBuilder(
+            services.database,
+            services.logger
+        ).create(Chain)
 
     #######################################################
 
-    def sync(self, mode="backfill", filters=None, **kwargs):
+    def _resolve_faction_meta(self, faction=None):
+        settings = self.services.settings
+        if settings:
+            cfg = settings.get_faction(faction)
+            if cfg:
+                return cfg.faction_id, cfg.tag
+        return settings.faction_id if settings else None, "GTS"
+
+    def sync(self, mode="backfill", filters=None, faction=None, **kwargs):
+
+        if str(faction or "").strip().lower() == "all":
+            total = 0
+            for f in self.services.settings.list_factions():
+                self.logger.info(f"Syncing chains for faction {f.tag} ({f.name})...")
+                total += self._sync_one_faction(mode=mode, filters=filters, faction=f.tag, **kwargs)
+            return total
+
+        return self._sync_one_faction(mode=mode, filters=filters, faction=faction, **kwargs)
+
+    def _sync_one_faction(self, mode="backfill", filters=None, faction=None, **kwargs):
 
         if mode == "backfill":
             from_ts = kwargs.get("from_timestamp")
             to_ts = kwargs.get("to_timestamp")
-            return self._backfill(filters, from_ts, to_ts)
+            return self._backfill(filters, from_ts, to_ts, faction=faction)
         elif mode == "live":
-            return self._live()
+            return self._live(faction=faction)
 
         raise ValueError(
             f"Unknown sync mode for chains: '{mode}'"
@@ -46,22 +63,14 @@ class ChainSync(BaseSync):
 
     #######################################################
 
-    def _backfill(self, filters, from_timestamp=None, to_timestamp=None):
+    def _backfill(self, filters, from_timestamp=None, to_timestamp=None, faction=None):
         """
         Sync chains from the API, optionally filtered by timestamp range.
-        
-        Timestamp filtering is useful for finding all chains that occurred during
-        a specific event (like a ranked war). Chains that start or end within the
-        range are included.
-        
-        Args:
-            filters: Not used for chains (kept for compatibility with BaseSync)
-            from_timestamp: Unix timestamp lower bound (import chains starting after this)
-            to_timestamp: Unix timestamp upper bound (import chains starting before this)
         """
+        faction_id, faction_tag = self._resolve_faction_meta(faction)
         total = 0
 
-        for page in self.chains.iter_pages():
+        for page in self.chains.iter_pages(faction_tag=faction_tag):
 
             for chain in page:
 
@@ -80,6 +89,8 @@ class ChainSync(BaseSync):
                     if chain.timestamp_start > to_timestamp:
                         continue
 
+                chain.faction_id = faction_id
+                chain.faction_tag = faction_tag
                 self.repo.insert(chain)
 
                 total += 1
@@ -88,16 +99,11 @@ class ChainSync(BaseSync):
 
     #######################################################
 
-    def _live(self):
+    def _live(self, faction=None):
         """
         Sync new chains since last import.
-        Finds the latest chain_id in the database and only imports
-        chains with higher IDs (newer chains have higher IDs).
         """
-        total = 0
-        
-        # Find the highest chain_id already in database
-        latest_db_chain = self.repo.get_latest_chain_id()
+        return self._backfill(None, faction=faction)
         
         for page in self.chains.iter_pages():
             

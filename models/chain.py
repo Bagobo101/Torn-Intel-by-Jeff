@@ -5,8 +5,7 @@ Chain model for faction chain data.
 """
 
 from core.model import Model
-from core.field import Integer
-from core.field import Real
+from core.field import Integer, Real, Text
 
 
 class Chain(Model):
@@ -15,6 +14,8 @@ class Chain(Model):
     table_name = "chains"
 
     chain_id = Integer(primary=True)
+    faction_id = Integer()
+    faction_tag = Text()
     chain_number = Integer()
     respect = Real()
     timestamp_start = Integer()
@@ -37,6 +38,8 @@ class Chain(Model):
         """Convert to dictionary for insertion"""
         return {
             "chain_id": self.chain_id,
+            "faction_id": self.faction_id,
+            "faction_tag": self.faction_tag,
             "chain_number": self.chain_number,
             "respect": self.respect,
             "timestamp_start": self.timestamp_start,

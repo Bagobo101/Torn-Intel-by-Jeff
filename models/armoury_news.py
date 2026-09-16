@@ -14,6 +14,8 @@ class ArmouryNews(Model):
     table_name = "armoury_news"
     
     event_id = Text(primary=True)  # String UUID from Torn API
+    faction_id = Integer()
+    faction_tag = Text()
     timestamp = Integer()
     player_id = Integer()
     player_name = Text()

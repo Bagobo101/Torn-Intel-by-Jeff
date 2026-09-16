@@ -243,10 +243,10 @@ class CrimeReport:
 
     #########################################################
 
-    def item_audit(self):
+    def item_audit(self, faction=None):
 
-        slots = self.queries.active_slots()
-        members = self.queries.members()
+        slots = self.queries.active_slots(faction=faction)
+        members = self.queries.members(faction=faction)
         member_ids = {int(member["user_id"]) for member in members}
         loans = [
             row
@@ -539,13 +539,15 @@ class CrimeReport:
 
     #########################################################
 
-    def delay_report(self, limit=25):
+    def delay_report(self, limit=25, faction=None):
 
-        active = self.queries.active_delay_events(limit=max(1, int(limit)))
-        resolved = self.queries.resolved_delay_events(limit=max(1, int(limit)))
+        active = self.queries.active_delay_events(limit=max(1, int(limit)), faction=faction)
+        resolved = self.queries.resolved_delay_events(limit=max(1, int(limit)), faction=faction)
 
         lines = []
         lines.append(f"\n{header('========== OC FLYING DELAYS ==========')}")
+        if faction:
+            lines.append(f"Faction: {highlight(str(faction).upper())}")
         lines.append("Tracks overdue planning crimes still blocked by assigned members who are traveling/abroad")
         lines.append(f"Active delays: {warning(str(len(active)))}")
         lines.append(f"Recent resolved delays: {info(str(len(resolved)))}")
@@ -596,9 +598,9 @@ class CrimeReport:
 
     #########################################################
 
-    def outside_members_report(self, limit=200):
+    def outside_members_report(self, limit=200, faction=None):
 
-        outside = self.queries.members_outside_crimes()
+        outside = self.queries.members_outside_crimes(faction=faction)
         recruits = [
             row
             for row in outside
@@ -608,6 +610,8 @@ class CrimeReport:
 
         lines = []
         lines.append(f"\n{header('========== OC OUTSIDE MEMBERS ==========')}")
+        if faction:
+            lines.append(f"Faction: {highlight(str(faction).upper())}")
         lines.append("Current roster members not assigned to active recruiting/planning crimes")
         lines.append(f"Outside total: {info(str(len(outside)))}")
         lines.append(f"Eligible outside (non-recruit): {success(str(len(eligible)))}")
@@ -646,10 +650,10 @@ class CrimeReport:
 
     #########################################################
 
-    def cpr_report(self):
+    def cpr_report(self, min_cpr=None, limit=50, faction=None):
 
-        slots = self.queries.active_slots()
-        stats = self.queries.cpr_stats()
+        slots = self.queries.active_slots(faction=faction)
+        stats = self.queries.cpr_stats(faction=faction)
         rules = self._load_rules()
 
         if not slots:
@@ -662,6 +666,8 @@ class CrimeReport:
 
         lines = []
         lines.append(f"\n{header('========== OC CPR REPORT ==========')}")
+        if faction:
+            lines.append(f"Faction: {highlight(str(faction).upper())}")
 
         fail_count = 0
 

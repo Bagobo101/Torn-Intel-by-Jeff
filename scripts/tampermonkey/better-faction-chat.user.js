@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Better Faction Chat – Torn.com (Desktop + Torn PDA)
 // @namespace    https://torn.com/
-// @version      1.6.4
+// @version      1.6.5
 // @description  Desktop and Torn PDA faction chat tools: status, group tags, officer groups, search, timestamps and touch-friendly controls
 // @author       sercann
 // @match        https://www.torn.com/*
@@ -15,7 +15,7 @@
 (function () {
     'use strict';
 
-    const BFC_VERSION = '1.6.4';
+    const BFC_VERSION = '1.6.5';
     const STORE_KEY   = 'bfc_settings_v2';
     const API_BASE    = 'https://api.torn.com';
     const IS_TOUCH    = matchMedia('(pointer: coarse)').matches || navigator.maxTouchPoints > 0;
@@ -144,6 +144,7 @@
         .bfc-nav-btn { background:rgba(255,255,255,.2); border:none; color:#fff; border-radius:3px; cursor:pointer; font-size:12px; padding:1px 7px; transition:background .15s; }
         .bfc-nav-btn:hover { background:rgba(255,255,255,.35); }
 
+        .bfc-chat-hidden { display:none!important; }
         #bfc-toolbar { display:flex; align-items:center; justify-content:space-between; gap:5px; padding:6px 8px; background:#1e1e1e; border-top:1px solid #333; box-sizing:border-box; width:100%; }
         .bfc-tb-group { display:flex; gap:4px; align-items:center; }
         .bfc-tb-btn { background:#2d2d2d; border:1px solid #444; color:#ccc; border-radius:4px; font-size:11px; padding:3px 6px; cursor:pointer; transition:all .15s; white-space:nowrap; }
@@ -1336,6 +1337,21 @@
         return style.display !== 'none' && style.visibility !== 'hidden' && el.getClientRects().length > 0;
     }
 
+    function isFactionChatOpen(box) {
+        return Array.from(box.querySelectorAll('textarea, [contenteditable="true"]'))
+            .some(composer => !composer.closest('#bfc-search-bar, #bfc-panel') && isVisible(composer));
+    }
+
+    function setChatToolsVisible(box, visible) {
+        if (!box) return;
+        box.querySelectorAll('#bfc-notify-bar, #bfc-toolbar, #bfc-search-bar, #bfc-mention-popup')
+            .forEach(element => element.classList.toggle('bfc-chat-hidden', !visible));
+        if (visible) return;
+        memberPopup?.classList.remove('bfc-open');
+        tagPopup?.classList.remove('bfc-open');
+        mentionSuggestPopup?.classList.remove('bfc-open');
+    }
+
     function findFactionChatBox() {
         const selectors = [
             '#chatRoot [id^="faction-"]',
@@ -1374,6 +1390,7 @@
         tryInjectRestoreBtn();
         const box = findFactionChatBox();
         if (!box) {
+            setChatToolsVisible(chatBoxEl, false);
             chatBoxEl = null;
             msgListEl = null;
             const pill = document.getElementById('bfc-status-pill');
@@ -1392,6 +1409,9 @@
         buildToolbar(chatBoxEl);
         buildSearchBar(chatBoxEl);
         setupMentionAutocomplete(chatBoxEl);
+        const chatOpen = isFactionChatOpen(chatBoxEl);
+        setChatToolsVisible(chatBoxEl, chatOpen);
+        if (!chatOpen) return;
         if (msgListEl) findMsgItems(msgListEl).forEach(processMsg);
     }
 

@@ -561,13 +561,15 @@ class ArmouryParser:
         return 0
     
     @classmethod
-    def parse(cls, event_id, event_data):
+    def parse(cls, event_id, event_data, faction_id=None, faction_tag=None):
         """
         Parse armoury news event.
         
         Args:
             event_id: Event ID from API
             event_data: Event dict with 'news' (HTML) and 'timestamp'
+            faction_id: Faction ID
+            faction_tag: Faction tag (e.g. GTS, GTH)
         
         Returns:
             Dict with parsed event or None if not recognized
@@ -595,6 +597,8 @@ class ArmouryParser:
 
                 return {
                     "event_id": event_id,
+                    "faction_id": faction_id,
+                    "faction_tag": faction_tag,
                     "timestamp": timestamp,
                     # Track who currently holds the loaned item.
                     "player_id": recipient_id,
@@ -620,6 +624,8 @@ class ArmouryParser:
                 
                 return {
                     "event_id": event_id,
+                    "faction_id": faction_id,
+                    "faction_tag": faction_tag,
                     "timestamp": timestamp,
                     "player_id": player_id,
                     "player_name": player_name,
@@ -644,6 +650,8 @@ class ArmouryParser:
                 
                 return {
                     "event_id": event_id,
+                    "faction_id": faction_id,
+                    "faction_tag": faction_tag,
                     "timestamp": timestamp,
                     "player_id": player_id,
                     "player_name": player_name,
@@ -669,6 +677,8 @@ class ArmouryParser:
                 
                 return {
                     "event_id": event_id,
+                    "faction_id": faction_id,
+                    "faction_tag": faction_tag,
                     "timestamp": timestamp,
                     "player_id": player_id,
                     "player_name": player_name,
@@ -695,6 +705,8 @@ class ArmouryParser:
                 
                 return {
                     "event_id": event_id,
+                    "faction_id": faction_id,
+                    "faction_tag": faction_tag,
                     "timestamp": timestamp,
                     "player_id": player_id,
                     "player_name": player_name,
@@ -720,6 +732,8 @@ class ArmouryParser:
 
                 return {
                     "event_id": event_id,
+                    "faction_id": faction_id,
+                    "faction_tag": faction_tag,
                     "timestamp": timestamp,
                     "player_id": player_id,
                     "player_name": player_name,
@@ -748,6 +762,8 @@ class ArmouryParser:
 
                 return {
                     "event_id": event_id,
+                    "faction_id": faction_id,
+                    "faction_tag": faction_tag,
                     "timestamp": timestamp,
                     # Track the source player as returning the item.
                     "player_id": source_id,
@@ -776,6 +792,8 @@ class ArmouryParser:
 
                 return {
                     "event_id": event_id,
+                    "faction_id": faction_id,
+                    "faction_tag": faction_tag,
                     "timestamp": timestamp,
                     # Track the source player as returning the item.
                     "player_id": source_id,

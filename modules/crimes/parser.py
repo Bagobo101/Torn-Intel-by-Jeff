@@ -10,12 +10,13 @@ class CrimeParser:
     ACTIVE_STATUSES = {"recruiting", "planning"}
 
     @staticmethod
-    def parse_slots(response, member_names=None, allowed_statuses=None, item_names=None):
+    def parse_slots(response, member_names=None, allowed_statuses=None, item_names=None, faction_id=None, faction_tag=None):
         """
         Parse recruiting/planning slots with assigned users and item requirements.
         """
         now = int(time.time())
         parsed = []
+        prefix = f"{faction_tag}:" if faction_tag else ""
 
         raw_crimes = response.get("crimes", []) if isinstance(response, dict) else []
 
@@ -51,13 +52,11 @@ class CrimeParser:
                 user_id = int(user.get("id") or 0)
                 item_id = int(item.get("id") or 0)
 
-                # Active crime slots require item requirements for auditing,
-                # but completed crimes may not expose item_requirement.
-                if item_id <= 0 and status.lower() in CrimeParser.ACTIVE_STATUSES:
+                # Skip unassigned slots that do not require any item.
+                if user_id <= 0 and item_id <= 0:
                     continue
 
-                # Keep unassigned active slots (user_id=0) when they already
-                # have an item requirement so audit can forecast stock needs.
+                # Unassigned slots are only kept for active crimes if they have an item requirement (for inventory audit).
                 if user_id <= 0 and not (
                     status.lower() in CrimeParser.ACTIVE_STATUSES and item_id > 0
                 ):
@@ -69,10 +68,12 @@ class CrimeParser:
                 parsed.append(
                     {
                         "history_key": (
-                            f"{crime_id}:{status}:{position}:{slot_index}:{user_id}:{item_id}:{cpr}"
+                            f"{prefix}{crime_id}:{status}:{position}:{slot_index}:{user_id}:{item_id}:{cpr}"
                         ),
-                        "slot_key": f"{crime_id}:{position}:{slot_index}:{user_id}:{item_id}",
+                        "slot_key": f"{prefix}{crime_id}:{position}:{slot_index}:{user_id}:{item_id}",
                         "crime_id": crime_id,
+                        "faction_id": faction_id,
+                        "faction_tag": faction_tag,
                         "crime_name": crime_name,
                         "status": status,
                         "difficulty": difficulty,
@@ -101,7 +102,7 @@ class CrimeParser:
         return parsed
 
     @staticmethod
-    def parse_members(response):
+    def parse_members(response, faction_id=None, faction_tag=None):
         """
         Parse current faction roster from faction basic payload.
         """
@@ -138,6 +139,8 @@ class CrimeParser:
             parsed.append(
                 {
                     "user_id": user_id,
+                    "faction_id": faction_id,
+                    "faction_tag": faction_tag,
                     "user_name": payload.get("name") or f"User {user_id}",
                     "position": payload.get("position") or "",
                     "is_in_oc": (
@@ -157,7 +160,7 @@ class CrimeParser:
         return parsed
 
     @staticmethod
-    def parse_crime_status_rows(response):
+    def parse_crime_status_rows(response, faction_id=None, faction_tag=None):
         now = int(time.time())
         parsed = []
 
@@ -178,6 +181,8 @@ class CrimeParser:
             parsed.append(
                 {
                     "crime_id": crime_id,
+                    "faction_id": faction_id,
+                    "faction_tag": faction_tag,
                     "crime_name": str(crime.get("name") or "Unknown"),
                     "difficulty": int(crime.get("difficulty") or 0),
                     "status": str(crime.get("status") or "").strip(),
@@ -193,20 +198,23 @@ class CrimeParser:
         return parsed
 
     @staticmethod
-    def parse_cpr_rows(slots):
+    def parse_cpr_rows(slots, faction_id=None, faction_tag=None):
 
         now = int(time.time())
         rows = []
+        prefix = f"{faction_tag}:" if faction_tag else ""
 
         for slot in slots:
             if int(slot.get("user_id") or 0) <= 0:
                 continue
 
-            cpr_key = f"{slot['user_id']}:{slot['difficulty']}:{str(slot['slot_position']).lower()}"
+            cpr_key = f"{prefix}{slot['user_id']}:{slot['difficulty']}:{str(slot['slot_position']).lower()}"
             rows.append(
                 {
                     "cpr_key": cpr_key,
                     "user_id": int(slot["user_id"]),
+                    "faction_id": faction_id or slot.get("faction_id"),
+                    "faction_tag": faction_tag or slot.get("faction_tag"),
                     "user_name": slot["user_name"],
                     "crime_level": int(slot["difficulty"]),
                     "position": slot["slot_position"],

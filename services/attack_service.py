@@ -17,9 +17,9 @@ class AttackService:
 
     #######################################################
 
-    def latest(self, filters=None):
+    def latest(self, filters=None, faction_tag=None):
 
-        response = self.gateway.faction_attacks(filters=filters)
+        response = self.gateway.faction_attacks(filters=filters, pool=faction_tag or "default")
 
         return self._parse_all(response)
 
@@ -31,26 +31,20 @@ class AttackService:
         sort="DESC",
         from_timestamp=None,
         to_timestamp=None,
+        faction_tag=None,
     ):
         """
         Yields one list of parsed Attack objects per page.
         Handles both v1 and v2 API formats with proper pagination.
-        
-        For v1 (dict-based responses):
-        - sort="DESC" walks backward from to_timestamp (or now if not specified)
-        - Continues fetching pages until reaching from_timestamp lower bound
-        - Each page walks backward in time, ensuring complete coverage
-        - Stops only when oldest attack is significantly below from_timestamp
-        
-        For v2 (list-based responses with _metadata.links.next):
-        - Uses cursor-based pagination from Torn's _metadata.links.next
         """
+        pool = faction_tag or "default"
 
         response = self.gateway.faction_attacks(
             filters=filters,
             sort=sort,
             from_timestamp=from_timestamp,
             to_timestamp=to_timestamp,
+            pool=pool,
         )
 
         consecutive_empty_pages = 0
@@ -62,7 +56,6 @@ class AttackService:
             if not attacks:
                 consecutive_empty_pages += 1
                 if consecutive_empty_pages >= 2:
-                    # Two consecutive empty pages means we've exhausted the data
                     break
                 yield []
                 continue
@@ -70,42 +63,34 @@ class AttackService:
             consecutive_empty_pages = 0
             yield attacks
 
-            # Check if this is v1 response (dict) or v2 (list with metadata)
             raw_attacks = response.get("attacks", [])
             is_v1 = isinstance(raw_attacks, dict)
 
             if is_v1 and attacks and sort == "DESC":
-                # V1 pagination: walk backward using `to` parameter
                 oldest_timestamp = min(a.timestamp_started for a in attacks)
                 
-                # If from_timestamp was specified and we've gone past it,
-                # we've covered the range and can safely stop
                 if from_timestamp is not None and oldest_timestamp < from_timestamp:
-                    # Continue one more fetch to ensure we get any edge cases
-                    # but after that, stop for sure
                     response = self.gateway.faction_attacks(
                         filters=filters,
                         sort=sort,
                         from_timestamp=from_timestamp,
                         to_timestamp=oldest_timestamp - 1,
+                        pool=pool,
                     )
                     next_attacks = self._parse_all(response)
                     if next_attacks:
-                        # Yield the final partial page
                         yield next_attacks
-                    # Now break
                     break
 
-                # Fetch next page going backward
                 response = self.gateway.faction_attacks(
                     filters=filters,
                     sort=sort,
                     from_timestamp=from_timestamp,
-                    to_timestamp=oldest_timestamp - 1,  # One second before oldest
+                    to_timestamp=oldest_timestamp - 1,
+                    pool=pool,
                 )
 
             else:
-                # V2 pagination: use cursor-based links
                 next_url = (
                     response
                     .get("_metadata", {})
@@ -116,7 +101,7 @@ class AttackService:
                 if not next_url:
                     break
 
-                response = self.gateway.follow(next_url)
+                response = self.gateway.follow(next_url, pool=pool)
 
     #######################################################
 

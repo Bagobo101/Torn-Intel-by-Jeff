@@ -13,6 +13,7 @@ Loads configuration from:
 
 from pathlib import Path
 import os
+import re
 from dotenv import load_dotenv
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -23,32 +24,29 @@ if ENV_FILE.exists():
     load_dotenv(ENV_FILE)
 
 
+class FactionConfig:
+    """Configuration for a specific tracked faction."""
+
+    def __init__(self, tag: str, name: str = "", faction_id: int | None = None, api_keys: list[str] | None = None):
+        self.tag = tag.upper().strip()
+        self.name = name.strip() or self.tag
+        self.faction_id = int(faction_id) if faction_id else None
+        self.api_keys = [str(k).strip() for k in (api_keys or []) if str(k).strip()]
+
+    def __repr__(self):
+        return f"<FactionConfig tag={self.tag} id={self.faction_id} name={self.name} keys={len(self.api_keys)}>"
+
+
 class Settings:
 
     def __init__(self):
-
-        # Support multiple API keys for rate limit distribution
-        # Can be separated by comma in env var: KEY1,KEY2,KEY3
-        api_keys_env = os.environ.get("TORN_API_KEYS", "")
-        api_key_single = os.environ.get("TORN_API_KEY", "")
-        
-        if api_keys_env:
-            self.api_keys = [k.strip() for k in api_keys_env.split(",") if k.strip()]
-        elif api_key_single:
-            self.api_keys = [api_key_single]
-        else:
-            # Default for development
-            self.api_keys = ['XwEyLp4K1Y4ZFSMr']
-        
-        # Use first key by default, but API key manager will rotate
-        self.api_key = self.api_keys[0] if self.api_keys else ""
 
         self.base_url = os.environ.get("TORN_API_BASE_URL", "https://api.torn.com")
 
         # Request handling
         self.request_delay = float(os.environ.get("TORN_REQUEST_DELAY", "0.6"))
         self.request_timeout = int(os.environ.get("TORN_REQUEST_TIMEOUT", "30"))
-        
+
         # Rate limit retry settings
         self.max_retries = int(os.environ.get("TORN_MAX_RETRIES", "5"))
         self.retry_backoff_base = int(os.environ.get("TORN_RETRY_BACKOFF_BASE", "2"))
@@ -62,17 +60,53 @@ class Settings:
 
         self.comment = os.environ.get("TORN_COMMENT", "TornIntel")
 
-        # Faction ID — used to filter reports to your faction members only
-        faction_id_env = os.environ.get("TORN_FACTION_ID", "")
-        self.faction_id = int(faction_id_env) if faction_id_env else None
+        # Global and Shoplifting API key pools
+        global_keys_env = os.environ.get("GLOBAL_API_KEYS", "") or os.environ.get("TORN_GLOBAL_API_KEYS", "")
+        shoplifting_keys_env = os.environ.get("TORN_SHOPLIFTING_API_KEYS", "")
+        shoplifting_key_single = os.environ.get("TORN_SHOPLIFTING_API_KEY", "")
+
+        global_list = []
+        if global_keys_env:
+            global_list.extend([k.strip() for k in global_keys_env.split(",") if k.strip()])
+        if shoplifting_keys_env:
+            global_list.extend([k.strip() for k in shoplifting_keys_env.split(",") if k.strip()])
+        if shoplifting_key_single and shoplifting_key_single not in global_list:
+            global_list.append(shoplifting_key_single)
+
+        self.global_api_keys = global_list
+        self.shoplifting_api_key = shoplifting_key_single or (self.global_api_keys[0] if self.global_api_keys else "")
+        self.shoplifting_webhook_url = os.environ.get("TORN_SHOPLIFTING_WEBHOOK_URL", "").strip()
+        self.shoplifting_mention = os.environ.get("TORN_SHOPLIFTING_MENTION", "").strip()
+        self.shoplifting_poll_seconds = int(os.environ.get("TORN_SHOPLIFTING_POLL_SECONDS", "30"))
+
+        # Factions mapping (e.g. GTS, GTH)
+        self.factions = self._parse_factions()
+
+        # Primary / default faction
+        if "GTS" in self.factions:
+            self.default_faction = self.factions["GTS"]
+        elif self.factions:
+            self.default_faction = next(iter(self.factions.values()))
+        else:
+            default_gts = FactionConfig(
+                tag="GTS",
+                name="Glory to Saints",
+                faction_id=None,
+                api_keys=['XwEyLp4K1Y4ZFSMr'],
+            )
+            self.factions["GTS"] = default_gts
+            self.default_faction = default_gts
+
+        # Legacy compatibility properties
+        self.faction_id = self.default_faction.faction_id
+        self.api_keys = list(self.default_faction.api_keys)
+        self.api_key = self.api_keys[0] if self.api_keys else ""
 
         # Database path
         db_path = os.environ.get("TORN_DATABASE_PATH", "data/tornintel.db")
         if db_path.startswith("/"):
-            # Absolute path
             self.database_path = Path(db_path)
         else:
-            # Relative to project root
             self.database_path = ROOT / db_path
 
         self.default_page_size = int(os.environ.get("TORN_DEFAULT_PAGE_SIZE", "100"))
@@ -97,8 +131,93 @@ class Settings:
         self.discord_oc_delay_channel_id = int(oc_delay_channel_env) if oc_delay_channel_env else None
         self.discord_oc_delay_poll_seconds = int(os.environ.get("TORN_DISCORD_OC_DELAY_POLL_SECONDS", "60"))
 
-        # Shoplifting Jewelry Store watcher
-        self.shoplifting_api_key = os.environ.get("TORN_SHOPLIFTING_API_KEY", "").strip()
-        self.shoplifting_webhook_url = os.environ.get("TORN_SHOPLIFTING_WEBHOOK_URL", "").strip()
-        self.shoplifting_mention = os.environ.get("TORN_SHOPLIFTING_MENTION", "").strip()
-        self.shoplifting_poll_seconds = int(os.environ.get("TORN_SHOPLIFTING_POLL_SECONDS", "30"))
+    #######################################################
+
+    def _parse_factions(self) -> dict[str, FactionConfig]:
+        """Discover factions from FACTION_<TAG>_* env vars and legacy fallback."""
+        factions: dict[str, FactionConfig] = {}
+        tag_pattern = re.compile(r"^FACTION_([A-Za-z0-9]+)_(KEYS|ID|NAME)$")
+
+        discovered_tags = set()
+        for env_key in os.environ:
+            match = tag_pattern.match(env_key.upper())
+            if match:
+                discovered_tags.add(match.group(1))
+
+        # Default faction names
+        default_names = {
+            "GTS": "Glory to Saints",
+            "GTH": "Glory to Hades",
+        }
+
+        for tag in discovered_tags:
+            keys_raw = os.environ.get(f"FACTION_{tag}_KEYS", "")
+            id_raw = os.environ.get(f"FACTION_{tag}_ID", "")
+            name_raw = os.environ.get(f"FACTION_{tag}_NAME", "") or default_names.get(tag, tag)
+
+            api_keys = [k.strip() for k in keys_raw.split(",") if k.strip()]
+            faction_id = int(id_raw) if id_raw and id_raw.isdigit() else None
+
+            factions[tag] = FactionConfig(
+                tag=tag,
+                name=name_raw,
+                faction_id=faction_id,
+                api_keys=api_keys,
+            )
+
+        # Legacy TORN_API_KEYS / TORN_FACTION_ID fallback
+        legacy_keys_env = os.environ.get("TORN_API_KEYS", "")
+        legacy_single_key = os.environ.get("TORN_API_KEY", "")
+        legacy_faction_id_env = os.environ.get("TORN_FACTION_ID", "")
+        legacy_faction_id = int(legacy_faction_id_env) if legacy_faction_id_env and legacy_faction_id_env.isdigit() else None
+
+        legacy_keys = []
+        if legacy_keys_env:
+            legacy_keys.extend([k.strip() for k in legacy_keys_env.split(",") if k.strip()])
+        elif legacy_single_key:
+            legacy_keys.append(legacy_single_key.strip())
+
+        if "GTS" not in factions and (legacy_keys or legacy_faction_id):
+            factions["GTS"] = FactionConfig(
+                tag="GTS",
+                name="Glory to Saints",
+                faction_id=legacy_faction_id,
+                api_keys=legacy_keys or ['XwEyLp4K1Y4ZFSMr'],
+            )
+        elif "GTS" in factions:
+            if not factions["GTS"].api_keys and legacy_keys:
+                factions["GTS"].api_keys = legacy_keys
+            if factions["GTS"].faction_id is None and legacy_faction_id:
+                factions["GTS"].faction_id = legacy_faction_id
+
+        return factions
+
+    #######################################################
+
+    def get_faction(self, tag_or_id) -> FactionConfig | None:
+        """Resolve a FactionConfig by tag (case-insensitive) or integer faction_id."""
+        if not tag_or_id:
+            return self.default_faction
+
+        query_str = str(tag_or_id).strip().upper()
+        if query_str in self.factions:
+            return self.factions[query_str]
+
+        if str(tag_or_id).isdigit():
+            fid = int(tag_or_id)
+            for faction in self.factions.values():
+                if faction.faction_id == fid:
+                    return faction
+
+        return None
+
+    def get_faction_id(self, tag_or_id) -> int | None:
+        faction = self.get_faction(tag_or_id)
+        return faction.faction_id if faction else None
+
+    def get_faction_tag(self, tag_or_id) -> str:
+        faction = self.get_faction(tag_or_id)
+        return faction.tag if faction else (self.default_faction.tag if self.default_faction else "GTS")
+
+    def list_factions(self) -> list[FactionConfig]:
+        return list(self.factions.values())

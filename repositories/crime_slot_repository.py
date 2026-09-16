@@ -8,23 +8,35 @@ import time
 class CrimeSlotRepository:
 
     FLYING_STATES = {"traveling", "abroad"}
+    ABROAD_COUNTRIES = (
+        "mexico", "cayman", "canada", "hawaii", "united kingdom", "uk",
+        "argentina", "switzerland", "japan", "china", "uae", "south africa"
+    )
 
     def __init__(self, database):
         self.db = database
 
     ##########################################################
 
-    def replace_active_slots(self, slots):
+    def replace_active_slots(self, slots, faction_tag=None, faction_id=None):
         """
         Replace current active OC slot snapshot with latest API snapshot.
+        If faction_tag/faction_id is provided, only replaces that faction's slots.
         """
-        self.db.execute("DELETE FROM crime_slots")
+        if faction_tag:
+            self.db.execute("DELETE FROM crime_slots WHERE faction_tag = ? OR faction_tag IS NULL", (faction_tag,))
+        elif faction_id:
+            self.db.execute("DELETE FROM crime_slots WHERE faction_id = ? OR faction_id IS NULL", (int(faction_id),))
+        else:
+            self.db.execute("DELETE FROM crime_slots")
 
         if slots:
             sql = """
-                INSERT INTO crime_slots (
+                INSERT OR REPLACE INTO crime_slots (
                     slot_key,
                     crime_id,
+                    faction_id,
+                    faction_tag,
                     crime_name,
                     status,
                     difficulty,
@@ -38,12 +50,14 @@ class CrimeSlotRepository:
                     item_is_reusable,
                     updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
             rows = [
                 (
                     slot["slot_key"],
                     slot["crime_id"],
+                    slot.get("faction_id") or faction_id,
+                    slot.get("faction_tag") or faction_tag,
                     slot["crime_name"],
                     slot["status"],
                     slot["difficulty"],
@@ -65,7 +79,7 @@ class CrimeSlotRepository:
 
     ##########################################################
 
-    def insert_history_slots(self, slots):
+    def insert_history_slots(self, slots, faction_tag=None, faction_id=None):
         """
         Append unique slot snapshots for historical player-position search.
         """
@@ -76,6 +90,8 @@ class CrimeSlotRepository:
             INSERT OR IGNORE INTO crime_slot_history (
                 history_key,
                 crime_id,
+                faction_id,
+                faction_tag,
                 crime_name,
                 status,
                 difficulty,
@@ -86,13 +102,15 @@ class CrimeSlotRepository:
                 required_item_id,
                 required_item_name,
                 updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
 
         rows = [
             (
                 slot.get("history_key") or slot.get("slot_key"),
                 slot["crime_id"],
+                slot.get("faction_id") or faction_id,
+                slot.get("faction_tag") or faction_tag,
                 slot["crime_name"],
                 slot["status"],
                 slot["difficulty"],
@@ -112,7 +130,7 @@ class CrimeSlotRepository:
 
     ##########################################################
 
-    def upsert_cpr_stats(self, rows):
+    def upsert_cpr_stats(self, rows, faction_tag=None, faction_id=None):
 
         for row in rows:
             existing = self.db.select(
@@ -124,20 +142,27 @@ class CrimeSlotRepository:
             if existing:
                 best = max(int(existing[0]["best_cpr"] or 0), int(row["cpr"] or 0))
 
+            f_id = row.get("faction_id") or faction_id
+            f_tag = row.get("faction_tag") or faction_tag
+
             self.db.execute(
                 """
                 INSERT INTO crime_cpr_stats (
                     cpr_key,
                     user_id,
+                    faction_id,
+                    faction_tag,
                     user_name,
                     crime_level,
                     position,
                     cpr,
                     best_cpr,
                     updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(cpr_key) DO UPDATE SET
                     user_name = excluded.user_name,
+                    faction_id = COALESCE(excluded.faction_id, crime_cpr_stats.faction_id),
+                    faction_tag = COALESCE(excluded.faction_tag, crime_cpr_stats.faction_tag),
                     cpr = excluded.cpr,
                     best_cpr = excluded.best_cpr,
                     updated_at = excluded.updated_at
@@ -145,6 +170,8 @@ class CrimeSlotRepository:
                 (
                     row["cpr_key"],
                     row["user_id"],
+                    f_id,
+                    f_tag,
                     row["user_name"],
                     row["crime_level"],
                     row["position"],
@@ -158,8 +185,27 @@ class CrimeSlotRepository:
 
     ##########################################################
 
-    def active_slots(self):
-
+    def active_slots(self, faction_tag=None, faction_id=None):
+        if faction_tag:
+            return self.db.select(
+                """
+                SELECT *
+                FROM crime_slots
+                WHERE faction_tag = ?
+                ORDER BY crime_id ASC, slot_position ASC, user_name ASC
+                """,
+                (faction_tag,),
+            )
+        if faction_id:
+            return self.db.select(
+                """
+                SELECT *
+                FROM crime_slots
+                WHERE faction_id = ?
+                ORDER BY crime_id ASC, slot_position ASC, user_name ASC
+                """,
+                (int(faction_id),),
+            )
         return self.db.select(
             """
             SELECT *
@@ -170,16 +216,20 @@ class CrimeSlotRepository:
 
     ##########################################################
 
-    def cpr_stats(self, min_cpr=None):
-        sql = """
-            SELECT *
-            FROM crime_cpr_stats
-        """
+    def cpr_stats(self, min_cpr=None, faction_tag=None, faction_id=None):
+        sql = "SELECT * FROM crime_cpr_stats WHERE 1=1"
         params = []
 
         if min_cpr is not None:
-            sql += " WHERE cpr >= ?"
+            sql += " AND cpr >= ?"
             params.append(int(min_cpr))
+
+        if faction_tag:
+            sql += " AND faction_tag = ?"
+            params.append(faction_tag)
+        elif faction_id:
+            sql += " AND faction_id = ?"
+            params.append(int(faction_id))
 
         sql += " ORDER BY crime_level DESC, position ASC, best_cpr DESC, user_name ASC"
 
@@ -187,17 +237,23 @@ class CrimeSlotRepository:
 
     ##########################################################
 
-    def replace_members(self, members):
+    def replace_members(self, members, faction_tag=None, faction_id=None):
         """
         Keep roster table aligned with current faction membership.
-        Members no longer in faction are removed automatically.
         """
-        self.db.execute("DELETE FROM crime_members")
+        if faction_tag:
+            self.db.execute("DELETE FROM crime_members WHERE faction_tag = ? OR faction_tag IS NULL", (faction_tag,))
+        elif faction_id:
+            self.db.execute("DELETE FROM crime_members WHERE faction_id = ? OR faction_id IS NULL", (int(faction_id),))
+        else:
+            self.db.execute("DELETE FROM crime_members")
 
         if members:
             sql = """
-                INSERT INTO crime_members (
+                INSERT OR REPLACE INTO crime_members (
                     user_id,
+                    faction_id,
+                    faction_tag,
                     user_name,
                     position,
                     is_in_oc,
@@ -205,11 +261,13 @@ class CrimeSlotRepository:
                     status_description,
                     last_action,
                     updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
             rows = [
                 (
                     int(member["user_id"]),
+                    member.get("faction_id") or faction_id,
+                    member.get("faction_tag") or faction_tag,
                     member["user_name"],
                     member.get("position", ""),
                     member.get("is_in_oc"),
@@ -226,11 +284,12 @@ class CrimeSlotRepository:
 
     ##########################################################
 
-    def members_outside_crimes(self):
-        return self.db.select(
-            """
+    def members_outside_crimes(self, faction_tag=None, faction_id=None):
+        sql = """
             SELECT
                 m.user_id,
+                m.faction_id,
+                m.faction_tag,
                 m.user_name,
                 m.position,
                 m.is_in_oc,
@@ -238,22 +297,50 @@ class CrimeSlotRepository:
                 m.updated_at
             FROM crime_members m
             LEFT JOIN (
-                SELECT DISTINCT user_id
+                SELECT DISTINCT user_id, faction_tag
                 FROM crime_slots
-            ) s ON s.user_id = m.user_id
+            ) s ON s.user_id = m.user_id AND (s.faction_tag = m.faction_tag OR m.faction_tag IS NULL)
             WHERE
-                m.is_in_oc = 0
-                OR (m.is_in_oc IS NULL AND s.user_id IS NULL)
-            ORDER BY m.user_name ASC
-            """
-        )
+                (m.is_in_oc = 0
+                OR (m.is_in_oc IS NULL AND s.user_id IS NULL))
+        """
+        params = []
+        if faction_tag:
+            sql += " AND m.faction_tag = ?"
+            params.append(faction_tag)
+        elif faction_id:
+            sql += " AND m.faction_id = ?"
+            params.append(int(faction_id))
+
+        sql += " ORDER BY m.user_name ASC"
+        return self.db.select(sql, tuple(params))
 
     ##########################################################
 
-    def members(self):
+    def members(self, faction_tag=None, faction_id=None):
+        if faction_tag:
+            return self.db.select(
+                """
+                SELECT user_id, faction_id, faction_tag, user_name, position, is_in_oc, status_state, status_description, last_action, updated_at
+                FROM crime_members
+                WHERE faction_tag = ?
+                ORDER BY user_name ASC
+                """,
+                (faction_tag,),
+            )
+        if faction_id:
+            return self.db.select(
+                """
+                SELECT user_id, faction_id, faction_tag, user_name, position, is_in_oc, status_state, status_description, last_action, updated_at
+                FROM crime_members
+                WHERE faction_id = ?
+                ORDER BY user_name ASC
+                """,
+                (int(faction_id),),
+            )
         return self.db.select(
             """
-            SELECT user_id, user_name, position, is_in_oc, status_state, status_description, last_action, updated_at
+            SELECT user_id, faction_id, faction_tag, user_name, position, is_in_oc, status_state, status_description, last_action, updated_at
             FROM crime_members
             ORDER BY user_name ASC
             """
@@ -261,7 +348,18 @@ class CrimeSlotRepository:
 
     ##########################################################
 
-    def active_delay_events(self, limit=50):
+    def active_delay_events(self, limit=50, faction_tag=None):
+        if faction_tag:
+            return self.db.select(
+                """
+                SELECT *
+                FROM crime_delay_events
+                WHERE resolved_at IS NULL AND faction_tag = ?
+                ORDER BY started_at ASC, crime_id ASC
+                LIMIT ?
+                """,
+                (faction_tag, int(limit)),
+            )
         return self.db.select(
             """
             SELECT *
@@ -275,7 +373,18 @@ class CrimeSlotRepository:
 
     ##########################################################
 
-    def resolved_delay_events(self, limit=50):
+    def resolved_delay_events(self, limit=50, faction_tag=None):
+        if faction_tag:
+            return self.db.select(
+                """
+                SELECT *
+                FROM crime_delay_events
+                WHERE resolved_at IS NOT NULL AND faction_tag = ?
+                ORDER BY resolved_at DESC, started_at DESC, crime_id DESC
+                LIMIT ?
+                """,
+                (faction_tag, int(limit)),
+            )
         return self.db.select(
             """
             SELECT *
@@ -289,7 +398,18 @@ class CrimeSlotRepository:
 
     ##########################################################
 
-    def list_unposted_delay_notifications(self, limit=50):
+    def list_unposted_delay_notifications(self, limit=50, faction_tag=None):
+        if faction_tag:
+            return self.db.select(
+                """
+                SELECT *
+                FROM crime_delay_notifications
+                WHERE COALESCE(discord_posted_at, 0) = 0 AND faction_tag = ?
+                ORDER BY created_at ASC, notification_id ASC
+                LIMIT ?
+                """,
+                (faction_tag, int(limit)),
+            )
         return self.db.select(
             """
             SELECT *
@@ -316,9 +436,18 @@ class CrimeSlotRepository:
 
     ##########################################################
 
-    def track_flying_delays(self, slots, members, crime_status_rows=None, observed_at=None):
+    def track_flying_delays(self, slots, members, crime_status_rows=None, observed_at=None, faction_id=None, faction_tag=None):
         observed_at = int(observed_at or time.time())
         crime_status_rows = crime_status_rows or []
+
+        # If members list or crime status list is empty, snapshot is invalid or partial.
+        # Avoid resolving active delays or creating spurious new ones.
+        if not members or not crime_status_rows:
+            return {
+                "active": len(self.active_delay_events(limit=500, faction_tag=faction_tag)),
+                "started": 0,
+                "resolved": 0,
+            }
 
         members_by_id = {
             int(member.get("user_id") or 0): dict(member)
@@ -348,10 +477,15 @@ class CrimeSlotRepository:
             if not self._member_is_flying(member):
                 continue
 
+            f_id = slot.get("faction_id") or faction_id
+            f_tag = slot.get("faction_tag") or faction_tag
+
             entry = delayed_crimes.setdefault(
                 crime_id,
                 {
                     "crime_id": crime_id,
+                    "faction_id": f_id,
+                    "faction_tag": f_tag,
                     "crime_name": slot.get("crime_name") or "Unknown",
                     "difficulty": int(slot.get("difficulty") or 0),
                     "status": slot.get("status") or "planning",
@@ -361,14 +495,36 @@ class CrimeSlotRepository:
             )
             entry["delaying_members"].append(member)
 
-        open_rows = self.db.select(
-            """
-            SELECT *
-            FROM crime_delay_events
-            WHERE resolved_at IS NULL
-            ORDER BY delay_id ASC
-            """
-        )
+        if faction_tag:
+            open_rows = self.db.select(
+                """
+                SELECT *
+                FROM crime_delay_events
+                WHERE resolved_at IS NULL AND faction_tag = ?
+                ORDER BY delay_id ASC
+                """,
+                (faction_tag,),
+            )
+        elif faction_id:
+            open_rows = self.db.select(
+                """
+                SELECT *
+                FROM crime_delay_events
+                WHERE resolved_at IS NULL AND faction_id = ?
+                ORDER BY delay_id ASC
+                """,
+                (int(faction_id),),
+            )
+        else:
+            open_rows = self.db.select(
+                """
+                SELECT *
+                FROM crime_delay_events
+                WHERE resolved_at IS NULL
+                ORDER BY delay_id ASC
+                """
+            )
+
         open_by_crime = {int(row["crime_id"] or 0): dict(row) for row in open_rows}
         status_by_crime = {
             int(row.get("crime_id") or 0): str(row.get("status") or "").strip().lower()
@@ -422,6 +578,8 @@ class CrimeSlotRepository:
                 """
                 INSERT INTO crime_delay_events (
                     crime_id,
+                    faction_id,
+                    faction_tag,
                     crime_name,
                     difficulty,
                     status,
@@ -433,10 +591,12 @@ class CrimeSlotRepository:
                     delaying_user_ids,
                     delaying_user_names,
                     delaying_states
-                ) VALUES (?, ?, ?, ?, ?, ?, NULL, 0, NULL, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, NULL, ?, ?, ?)
                 """,
                 (
                     entry["crime_id"],
+                    entry.get("faction_id") or faction_id,
+                    entry.get("faction_tag") or faction_tag,
                     entry["crime_name"],
                     entry["difficulty"],
                     entry["status"],
@@ -458,6 +618,8 @@ class CrimeSlotRepository:
                 event_type="crime_delay_started",
                 delay_id=delay_id,
                 crime_id=entry["crime_id"],
+                faction_id=entry.get("faction_id") or faction_id,
+                faction_tag=entry.get("faction_tag") or faction_tag,
                 crime_name=entry["crime_name"],
                 difficulty=entry["difficulty"],
                 started_at=int(entry["delay_start_at"]),
@@ -475,9 +637,25 @@ class CrimeSlotRepository:
             if crime_id in delayed_crimes:
                 continue
 
+            crime_status = status_by_crime.get(crime_id)
+
+            # If the crime is still in planning, verify that we actually have slot and member data
+            # in the snapshot before concluding that the flying delay cleared.
+            if crime_status == "planning":
+                assigned_slots = [
+                    s for s in (slots or [])
+                    if int(s.get("crime_id") or 0) == crime_id and int(s.get("user_id") or 0) > 0
+                ]
+                # If we don't have slots for this crime in the snapshot, keep the delay open
+                if not assigned_slots:
+                    continue
+                # If any assigned member is missing from the roster snapshot, keep the delay open
+                if any(int(s.get("user_id") or 0) not in members_by_id for s in assigned_slots):
+                    continue
+
             resolved_at = observed_at
             duration_seconds = max(0, resolved_at - int(existing.get("started_at") or resolved_at))
-            resolution = self._resolve_delay_resolution(status_by_crime.get(crime_id))
+            resolution = self._resolve_delay_resolution(crime_status)
 
             self.db.execute(
                 """
@@ -500,6 +678,8 @@ class CrimeSlotRepository:
                 event_type="crime_delay_resolved",
                 delay_id=int(existing["delay_id"]),
                 crime_id=int(existing.get("crime_id") or 0),
+                faction_id=existing.get("faction_id") or faction_id,
+                faction_tag=existing.get("faction_tag") or faction_tag,
                 crime_name=existing.get("crime_name") or "Unknown",
                 difficulty=int(existing.get("difficulty") or 0),
                 started_at=int(existing.get("started_at") or 0),
@@ -528,6 +708,8 @@ class CrimeSlotRepository:
         event_type,
         delay_id,
         crime_id,
+        faction_id=None,
+        faction_tag=None,
         crime_name,
         difficulty,
         started_at,
@@ -545,6 +727,8 @@ class CrimeSlotRepository:
                 event_type,
                 delay_id,
                 crime_id,
+                faction_id,
+                faction_tag,
                 crime_name,
                 difficulty,
                 started_at,
@@ -556,12 +740,14 @@ class CrimeSlotRepository:
                 resolution,
                 created_at,
                 discord_posted_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
             """,
             (
                 str(event_type),
                 int(delay_id),
                 int(crime_id),
+                int(faction_id) if faction_id else None,
+                str(faction_tag) if faction_tag else None,
                 str(crime_name or "Unknown"),
                 int(difficulty or 0),
                 int(started_at or 0),
@@ -581,7 +767,14 @@ class CrimeSlotRepository:
         if not member:
             return False
         state = str(member.get("status_state") or "").strip().lower()
-        return state in self.FLYING_STATES
+        if state in self.FLYING_STATES:
+            return True
+        desc = str(member.get("status_description") or "").strip().lower()
+        if "traveling" in desc or "abroad" in desc:
+            return True
+        if any(country in desc for country in self.ABROAD_COUNTRIES):
+            return True
+        return False
 
     ##########################################################
 

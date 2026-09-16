@@ -72,20 +72,11 @@ class ArmouryService:
         sort="DESC",
         from_timestamp=None,
         to_timestamp=None,
+        faction_tag=None,
     ):
         """
         Yields one list of parsed ArmouryNews objects per page.
         Walks backward through armoury history using timestamp-based pagination.
-        
-        For DESC (backfill):
-        - Starts at to_timestamp (or now if not specified)
-        - Each page's oldest timestamp becomes the next request's boundary
-        - Continues until reaching from_timestamp lower bound
-        - Ensures complete coverage without gaps or duplicates
-        
-        For ASC (live, currently unused but supported for consistency with attacks):
-        - Would walk forward from from_timestamp
-        - Currently falls back to DESC behavior (Torn API only supports backward)
         
         Args:
             faction_id: Faction ID
@@ -93,6 +84,7 @@ class ArmouryService:
             sort: "DESC" for backfill, "ASC" for live (Torn API only supports backward)
             from_timestamp: Lower bound (stop walking backward here)
             to_timestamp: Upper bound (start walking backward from here)
+            faction_tag: Faction tag (e.g. GTS, GTH)
         
         Yields:
             List of parsed ArmouryNews objects
@@ -108,6 +100,7 @@ class ArmouryService:
                 faction_id,
                 limit=100,
                 to_timestamp=current_to,
+                pool=faction_tag,
             )
 
             if not response:
@@ -129,7 +122,7 @@ class ArmouryService:
                 event_id = event_id_str
                 event_ts = int(event_data.get("timestamp", 0) or 0)
                 
-                parsed = ArmouryParser.parse(event_id, event_data)
+                parsed = ArmouryParser.parse(event_id, event_data, faction_id=faction_id, faction_tag=faction_tag)
                 if parsed:
                     parsed = self._apply_api_item_fallback(parsed)
                     parsed_events.append(parsed)

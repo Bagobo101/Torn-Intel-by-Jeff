@@ -303,6 +303,8 @@ class ReviveDiscordStore:
                     event_type TEXT NOT NULL,
                     delay_id INTEGER,
                     crime_id INTEGER,
+                    faction_id INTEGER,
+                    faction_tag TEXT,
                     crime_name TEXT,
                     difficulty INTEGER,
                     started_at INTEGER,
@@ -318,6 +320,17 @@ class ReviveDiscordStore:
                 """
             )
             conn.commit()
+
+            delay_columns = conn.execute("PRAGMA table_info(crime_delay_notifications)").fetchall()
+            delay_names = {str(col[1]).lower() for col in delay_columns}
+
+            if "faction_id" not in delay_names:
+                conn.execute("ALTER TABLE crime_delay_notifications ADD COLUMN faction_id INTEGER")
+                conn.commit()
+
+            if "faction_tag" not in delay_names:
+                conn.execute("ALTER TABLE crime_delay_notifications ADD COLUMN faction_tag TEXT")
+                conn.commit()
         finally:
             conn.close()
 
@@ -665,19 +678,31 @@ class ReviveDiscordStore:
 
     #######################################################
 
-    def list_unposted_crime_delay_notifications(self, limit: int = 50):
+    def list_unposted_crime_delay_notifications(self, limit: int = 50, faction_tag: str | None = None):
         conn = self._connect()
         try:
-            rows = conn.execute(
-                """
-                SELECT *
-                FROM crime_delay_notifications
-                WHERE COALESCE(discord_posted_at, 0) = 0
-                ORDER BY created_at ASC, notification_id ASC
-                LIMIT ?
-                """,
-                (int(limit),),
-            ).fetchall()
+            if faction_tag:
+                rows = conn.execute(
+                    """
+                    SELECT *
+                    FROM crime_delay_notifications
+                    WHERE COALESCE(discord_posted_at, 0) = 0 AND faction_tag = ?
+                    ORDER BY created_at ASC, notification_id ASC
+                    LIMIT ?
+                    """,
+                    (faction_tag, int(limit)),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT *
+                    FROM crime_delay_notifications
+                    WHERE COALESCE(discord_posted_at, 0) = 0
+                    ORDER BY created_at ASC, notification_id ASC
+                    LIMIT ?
+                    """,
+                    (int(limit),),
+                ).fetchall()
             return [dict(r) for r in rows]
         finally:
             conn.close()
@@ -958,8 +983,11 @@ def _build_report_command(
     bounty_cost=0,
     per_assist=0,
     pay_outside_hits=0,
+    faction=None,
 ):
     parts = ["report", module, report_type]
+    if faction:
+        parts.extend(["--faction", str(faction).upper()])
     if chain_id is not None:
         parts.extend(["--chain_id", str(chain_id)])
     if war_id is not None:
@@ -1164,7 +1192,11 @@ def serve_discord_bot(token: str, prefix: str = "!ti", guild_id: int | None = No
             return int(settings.discord_revive_channel_id)
         return int(default_channel_id) if default_channel_id is not None else None
 
-    def resolve_oc_delay_channel_id(default_channel_id: int | None = None):
+    def resolve_oc_delay_channel_id(default_channel_id: int | None = None, faction_tag: str | None = None):
+        if faction_tag:
+            configured = revive_store.get_setting(f"oc_delay_channel_id_{str(faction_tag).upper()}")
+            if configured and str(configured).isdigit():
+                return int(configured)
         configured = revive_store.get_setting("oc_delay_channel_id")
         if configured and str(configured).isdigit():
             return int(configured)
@@ -1210,25 +1242,51 @@ def serve_discord_bot(token: str, prefix: str = "!ti", guild_id: int | None = No
         return (int(binding) if binding else None), mode
 
     def fetch_shoplifting():
-        api_key = settings.shoplifting_api_key or settings.api_key
-        if not api_key:
+        candidate_keys = list(settings.global_api_keys)
+        if not candidate_keys:
+            # Fallback to all configured faction keys
+            for faction in settings.factions.values():
+                for k in faction.api_keys:
+                    if k not in candidate_keys:
+                        candidate_keys.append(k)
+        if settings.shoplifting_api_key and settings.shoplifting_api_key not in candidate_keys:
+            candidate_keys.insert(0, settings.shoplifting_api_key)
+        if settings.api_key and settings.api_key not in candidate_keys:
+            candidate_keys.append(settings.api_key)
+
+        if not candidate_keys:
             raise RuntimeError("No Torn API key configured for shoplifting.")
-        url = f"{str(settings.base_url).rstrip('/')}/torn/?{urlencode({'key': api_key, 'comment': settings.comment, 'selections': 'shoplifting'})}"
-        request = Request(
-            url,
-            headers={
-                "Accept": "application/json",
-                "User-Agent": "TornIntel-DiscordBot/1.0",
-            },
-        )
-        try:
-            with urlopen(request, timeout=settings.request_timeout) as response:
-                return json.loads(response.read().decode("utf-8", errors="replace") or "{}")
-        except HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace").strip()
-            raise RuntimeError(
-                f"Torn rejected the shoplifting request ({exc.code}): {detail[:300] or exc.reason}"
-            ) from exc
+
+        last_exc = None
+        for api_key in candidate_keys:
+            url = f"{str(settings.base_url).rstrip('/')}/torn/?{urlencode({'key': api_key, 'comment': settings.comment, 'selections': 'shoplifting'})}"
+            request = Request(
+                url,
+                headers={
+                    "Accept": "application/json",
+                    "User-Agent": "TornIntel-DiscordBot/1.0",
+                },
+            )
+            try:
+                with urlopen(request, timeout=settings.request_timeout) as response:
+                    data = json.loads(response.read().decode("utf-8", errors="replace") or "{}")
+                    if isinstance(data, dict) and "error" in data:
+                        last_exc = RuntimeError(f"Torn API error on key {api_key[:8]}...: {data.get('error')}")
+                        continue
+                    return data
+            except HTTPError as exc:
+                detail = exc.read().decode("utf-8", errors="replace").strip()
+                last_exc = RuntimeError(
+                    f"Torn rejected the shoplifting request ({exc.code}): {detail[:300] or exc.reason}"
+                )
+                continue
+            except Exception as exc:
+                last_exc = exc
+                continue
+
+        if last_exc:
+            raise last_exc
+        return {}
 
     async def resolve_revive_channel(interaction: discord.Interaction):
         channel_id = resolve_revive_channel_id(interaction.channel_id)
@@ -1414,6 +1472,8 @@ def serve_discord_bot(token: str, prefix: str = "!ti", guild_id: int | None = No
 
     def build_oc_delay_embed(row):
         event_type = str(row.get("event_type") or "crime_delay_started").strip().lower()
+        faction_tag = str(row.get("faction_tag") or "").strip().upper()
+        prefix = f"[{faction_tag}] " if faction_tag else ""
         started_at = int(row.get("started_at") or 0)
         resolved_at = int(row.get("resolved_at") or 0) if row.get("resolved_at") is not None else None
         duration_seconds = int(row.get("duration_seconds") or 0)
@@ -1425,14 +1485,14 @@ def serve_discord_bot(token: str, prefix: str = "!ti", guild_id: int | None = No
         resolution = str(row.get("resolution") or "inactive")
 
         if event_type == "crime_delay_resolved":
-            title = "OC Delay Resolved"
+            title = f"{prefix}OC Delay Resolved"
             color = 0x2ecc71 if resolution == "completed" else 0x3498db
             description = (
                 f"**{crime_name}** [{crime_id}] is no longer blocked by a flying member.\n"
                 f"Total delay: **{format_duration_brief(duration_seconds)}**"
             )
         else:
-            title = "OC Delay Started"
+            title = f"{prefix}OC Delay Started"
             color = 0xe67e22
             description = (
                 f"**{crime_name}** [{crime_id}] is currently blocked by a flying member.\n"
@@ -1440,6 +1500,8 @@ def serve_discord_bot(token: str, prefix: str = "!ti", guild_id: int | None = No
             )
 
         embed = discord.Embed(title=title, description=description, color=color)
+        if faction_tag:
+            embed.add_field(name="Faction", value=faction_tag, inline=True)
         embed.add_field(name="Tier", value=str(difficulty), inline=True)
         embed.add_field(name="Flyers", value=flyers, inline=False)
         embed.add_field(name="Travel State", value=travel_text, inline=False)
@@ -2137,54 +2199,57 @@ def serve_discord_bot(token: str, prefix: str = "!ti", guild_id: int | None = No
         while not bot.is_closed():
             try:
                 now = time.time()
+                factions_to_poll = settings.list_factions() or [settings.default_faction]
+
                 if (now - last_sync_at) >= poll_seconds:
-                    sync_result = bridge.run_foreground(
-                        "sync crimes --mode live",
-                        timeout_seconds=max(120, int(timeout_seconds or 180)),
-                    )
-                    if not sync_result.get("ok") and logger:
-                        logger.warning(
-                            f"Discord OC delay watcher sync failed (exit {sync_result.get('returncode')}): "
-                            f"{str(sync_result.get('output') or '').splitlines()[-1] if sync_result.get('output') else 'no output'}"
+                    for faction_cfg in factions_to_poll:
+                        tag = faction_cfg.tag if faction_cfg else "GTS"
+                        sync_result = bridge.run_foreground(
+                            f"sync crimes --mode live --faction {tag}",
+                            timeout_seconds=max(120, int(timeout_seconds or 180)),
                         )
+                        if not sync_result.get("ok") and logger:
+                            logger.warning(
+                                f"Discord OC delay watcher sync failed for [{tag}] (exit {sync_result.get('returncode')}): "
+                                f"{str(sync_result.get('output') or '').splitlines()[-1] if sync_result.get('output') else 'no output'}"
+                            )
                     last_sync_at = time.time()
 
-                rows = revive_store.list_unposted_crime_delay_notifications(limit=50)
-                if not rows:
-                    await asyncio.sleep(poll_seconds)
-                    continue
-
-                channel_id = resolve_oc_delay_channel_id()
-                if channel_id is None:
-                    if logger:
-                        logger.warning("OC delay watcher skipped: no OC delay channel configured")
-                    await asyncio.sleep(poll_seconds)
-                    continue
-
-                channel = bot.get_channel(int(channel_id))
-                if channel is None:
-                    try:
-                        channel = await bot.fetch_channel(int(channel_id))
-                    except Exception as exc:
-                        if logger:
-                            logger.warning(f"OC delay watcher could not fetch channel {channel_id}: {type(exc).__name__}: {exc}")
-                        await asyncio.sleep(poll_seconds)
+                for faction_cfg in factions_to_poll:
+                    tag = faction_cfg.tag if faction_cfg else "GTS"
+                    rows = revive_store.list_unposted_crime_delay_notifications(limit=50, faction_tag=tag)
+                    if not rows:
                         continue
 
-                for row in rows:
-                    try:
-                        embed = build_oc_delay_embed(row)
-                        await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
-                        revive_store.mark_crime_delay_notification_discord_posted(int(row["notification_id"]))
+                    channel_id = resolve_oc_delay_channel_id(faction_tag=tag)
+                    if channel_id is None:
                         if logger:
-                            logger.info(
-                                f"Posted OC delay alert {row.get('event_type')} for crime {row.get('crime_id')} to channel {channel_id}"
-                            )
-                    except Exception as exc:
-                        if logger:
-                            logger.warning(
-                                f"Failed to post OC delay alert for crime {row.get('crime_id')}: {type(exc).__name__}: {exc}"
-                            )
+                            logger.warning(f"OC delay watcher skipped for [{tag}]: no OC delay channel configured")
+                        continue
+
+                    channel = bot.get_channel(int(channel_id))
+                    if channel is None:
+                        try:
+                            channel = await bot.fetch_channel(int(channel_id))
+                        except Exception as exc:
+                            if logger:
+                                logger.warning(f"OC delay watcher could not fetch channel {channel_id} for [{tag}]: {type(exc).__name__}: {exc}")
+                            continue
+
+                    for row in rows:
+                        try:
+                            embed = build_oc_delay_embed(row)
+                            await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+                            revive_store.mark_crime_delay_notification_discord_posted(int(row["notification_id"]))
+                            if logger:
+                                logger.info(
+                                    f"Posted OC delay alert {row.get('event_type')} for crime {row.get('crime_id')} [{tag}] to channel {channel_id}"
+                                )
+                        except Exception as exc:
+                            if logger:
+                                logger.warning(
+                                    f"Failed to post OC delay alert for crime {row.get('crime_id')} [{tag}]: {type(exc).__name__}: {exc}"
+                                )
                 await asyncio.sleep(1)
             except Exception as exc:
                 if logger:
@@ -2737,9 +2802,16 @@ def serve_discord_bot(token: str, prefix: str = "!ti", guild_id: int | None = No
             )
 
     @bot.tree.command(name="ti_oc_delay_channel", description="View or set the channel used for OC delay alerts")
-    @app_commands.describe(channel_ref="Optional channel ID or mention, e.g. 123... or <#123...>")
-    async def ti_oc_delay_channel_slash(interaction: discord.Interaction, channel_ref: str | None = None):
+    @app_commands.describe(
+        channel_ref="Optional channel ID or mention, e.g. 123... or <#123...>",
+        faction="Optional faction tag (e.g. GTS, GTH) to configure per-faction channels",
+    )
+    async def ti_oc_delay_channel_slash(interaction: discord.Interaction, channel_ref: str | None = None, faction: str | None = None):
         await interaction.response.defer(thinking=False)
+        faction_tag = str(faction).strip().upper() if faction else None
+        setting_key = f"oc_delay_channel_id_{faction_tag}" if faction_tag else "oc_delay_channel_id"
+        faction_label = f" [{faction_tag}]" if faction_tag else ""
+
         if channel_ref is not None:
             if interaction.guild is None:
                 await send_embed_chunks(
@@ -2802,28 +2874,28 @@ def serve_discord_bot(token: str, prefix: str = "!ti", guild_id: int | None = No
                 )
                 return
 
-            revive_store.set_setting("oc_delay_channel_id", str(int(parsed_channel_id)))
+            revive_store.set_setting(setting_key, str(int(parsed_channel_id)))
             await send_embed_chunks(
                 interaction.followup.send,
                 title="OC Delay Channel Updated",
-                text=f"OC delay alerts will now post in <#{int(parsed_channel_id)}>.",
+                text=f"OC delay alerts{faction_label} will now post in <#{int(parsed_channel_id)}>.",
                 ok=True,
             )
             return
 
-        current = resolve_oc_delay_channel_id(interaction.channel_id)
+        current = resolve_oc_delay_channel_id(interaction.channel_id, faction_tag=faction_tag)
         if current:
             await send_embed_chunks(
                 interaction.followup.send,
                 title="OC Delay Channel",
-                text=f"Current OC delay channel: <#{current}>",
+                text=f"Current OC delay channel{faction_label}: <#{current}>",
                 ok=True,
             )
         else:
             await send_embed_chunks(
                 interaction.followup.send,
                 title="OC Delay Channel",
-                text="No explicit OC delay channel set. Alerts are disabled until a channel is configured.",
+                text=f"No explicit OC delay channel set{faction_label}. Alerts are disabled until a channel is configured.",
                 ok=True,
             )
 
@@ -3190,6 +3262,7 @@ def serve_discord_bot(token: str, prefix: str = "!ti", guild_id: int | None = No
         category="Category filter when needed (revives requests_list uses status)",
         top_n="Top N rows for leaderboard-style reports",
         limit="Row limit for list reports",
+        faction="Optional faction tag (e.g. GTS, GTH)",
         view_summary="For war_payout: show summary embed",
         view_top="For war_payout: show top players embed",
         view_full="For war_payout: show full payout table",
@@ -3227,6 +3300,7 @@ def serve_discord_bot(token: str, prefix: str = "!ti", guild_id: int | None = No
         category: str | None = None,
         top_n: int = 10,
         limit: int = 50,
+        faction: str | None = None,
         view_summary: bool = True,
         view_top: bool = True,
         view_full: bool = False,
@@ -3318,6 +3392,7 @@ def serve_discord_bot(token: str, prefix: str = "!ti", guild_id: int | None = No
             category=category,
             top_n=top_n,
             limit=limit,
+            faction=faction,
         )
 
         async def send_followup(**kwargs):

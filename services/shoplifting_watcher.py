@@ -78,13 +78,19 @@ class ShopliftingWatcher:
         except KeyboardInterrupt:
             self.logger.info("Shoplifting watcher stopped.")
 
-    def _fetch_shoplifting(self, api_key):
+    def _fetch_shoplifting(self, api_key=None):
         base_url = self.settings.base_url.rstrip("/")
+        if self.http_client and getattr(self.http_client, "key_manager", None):
+            key = self.http_client.key_manager.get_next_key(pool="GLOBAL", skip_rate_limited=True, fallback_to_global=True)
+        else:
+            key = api_key or self.settings.shoplifting_api_key or self.settings.api_key
+
         return self.http_client.get(
             f"{base_url}/torn/",
-            params={"key": api_key, "comment": self.settings.comment, "selections": "shoplifting"},
+            params={"key": key, "comment": self.settings.comment, "selections": "shoplifting"},
             max_retries=self.settings.max_retries,
             retry_backoff_base=self.settings.retry_backoff_base,
+            pool="GLOBAL",
         )
 
     @classmethod

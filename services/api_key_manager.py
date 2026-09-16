@@ -1,44 +1,74 @@
 """
 services/api_key_manager.py
 
-Manages multiple API keys for rate limit distribution and rotation.
-Handles key cycling, rate limit tracking, and retry logic.
+Manages multiple API keys for rate limit distribution, rotation, and multi-faction pools.
+Handles key cycling, rate limit tracking, failover, and retry logic.
 """
+
+from __future__ import annotations
 
 import time
 from collections import defaultdict
+from typing import Any
 
 
 class ApiKeyManager:
     """
-    Manage multiple API keys with automatic rotation and rate limit handling.
+    Manage multiple API keys with automatic rotation, multi-faction pools, and failover.
     
     Features:
+    - Faction-specific key pools (e.g. GTS, GTH) and global failover pools
     - Cycle through keys to distribute API calls
     - Track rate limit status per key
-    - Exponential backoff retry logic
-    - Automatic key recovery
+    - Automatic key failover and recovery
     """
 
-    def __init__(self, api_keys, settings, logger):
+    def __init__(self, api_keys=None, settings=None, logger=None):
         """
         Args:
-            api_keys: List of API key strings
-            settings: Settings object with max_retries, retry_backoff_base, rate_limit_error_code
+            api_keys: Optional legacy list of API key strings
+            settings: Settings object
             logger: Logger instance
         """
-        self.api_keys = api_keys
         self.settings = settings
         self.logger = logger
         
-        # Track current key index for round-robin rotation
+        # Legacy list of keys
+        self.api_keys = list(api_keys or (settings.api_keys if settings else []))
+        
+        # Build pools
+        self.pools: dict[str, list[str]] = {}
+        self.pool_indices: dict[str, int] = defaultdict(int)
+
+        if settings:
+            for tag, faction in settings.factions.items():
+                if faction.api_keys:
+                    self.pools[tag.upper()] = list(faction.api_keys)
+            if settings.global_api_keys:
+                self.pools["GLOBAL"] = list(settings.global_api_keys)
+
+        # Ensure default pool exists
+        if "GTS" not in self.pools and self.api_keys:
+            self.pools["GTS"] = list(self.api_keys)
+
+        # Collect ALL unique keys
+        all_keys = []
+        for p_keys in self.pools.values():
+            for k in p_keys:
+                if k not in all_keys:
+                    all_keys.append(k)
+        if not all_keys and self.api_keys:
+            all_keys = list(self.api_keys)
+        self.pools["ALL"] = all_keys
+
+        # Legacy current key index
         self.current_key_index = 0
         
         # Track rate limit status per key
-        # key -> {"rate_limited": bool, "retry_after": timestamp, "failed_attempts": int}
+        # key -> {"rate_limited": bool, "retry_after": timestamp, "failed_attempts": int, ...}
         self.key_status = defaultdict(lambda: {
             "rate_limited": False,
-            "retry_after": 0,
+            "retry_after": 0.0,
             "failed_attempts": 0,
             "total_requests": 0,
             "total_rate_limits": 0,
@@ -46,45 +76,93 @@ class ApiKeyManager:
 
     ########################################################
 
-    def get_next_key(self, skip_rate_limited=True):
+    def _resolve_pool_keys(self, pool: str | None = "default") -> tuple[str, list[str]]:
+        if not pool or pool == "default":
+            tag = self.settings.default_faction.tag if self.settings and self.settings.default_faction else "GTS"
+        else:
+            tag = str(pool).strip().upper()
+
+        if tag in self.pools and self.pools[tag]:
+            return tag, self.pools[tag]
+
+        if self.settings:
+            faction = self.settings.get_faction(tag)
+            if faction and faction.api_keys:
+                return faction.tag, faction.api_keys
+
+        if tag == "GLOBAL" and "GLOBAL" in self.pools and self.pools["GLOBAL"]:
+            return "GLOBAL", self.pools["GLOBAL"]
+
+        # Fallback to ALL or legacy keys
+        return "ALL", self.pools.get("ALL", self.api_keys)
+
+    ########################################################
+
+    def has_available_key(self, pool: str | None = "default") -> bool:
+        """Check if any key in the specified pool is currently not rate limited."""
+        _, keys = self._resolve_pool_keys(pool)
+        if not keys:
+            return False
+        now = time.time()
+        for k in keys:
+            status = self.key_status[k]
+            if not status["rate_limited"] or now >= status["retry_after"]:
+                return True
+        return False
+
+    ########################################################
+
+    def get_pool_keys(self, pool: str | None = "default") -> list[str]:
+        """Return the list of keys configured for a pool."""
+        _, keys = self._resolve_pool_keys(pool)
+        return list(keys)
+
+    ########################################################
+
+    def get_next_key(self, pool: str | None = "default", skip_rate_limited: bool = True, fallback_to_global: bool = False) -> str:
         """
-        Get the next API key, optionally skipping rate-limited ones.
+        Get the next API key for the pool, optionally skipping rate-limited ones.
         Uses round-robin rotation.
-        
-        Args:
-            skip_rate_limited: If True, skip keys that are currently rate limited
-        
-        Returns:
-            API key string
         """
-        start_index = self.current_key_index
-        
+        pool_tag, keys = self._resolve_pool_keys(pool)
+        if not keys:
+            return self.settings.api_key if self.settings else ""
+
+        start_index = self.pool_indices[pool_tag] % len(keys)
+        curr = start_index
+
+        now = time.time()
         while True:
-            key = self.api_keys[self.current_key_index]
-            self.current_key_index = (self.current_key_index + 1) % len(self.api_keys)
-            
-            # Check if we should skip this key
+            key = keys[curr]
+            curr = (curr + 1) % len(keys)
+            self.pool_indices[pool_tag] = curr
+
             if skip_rate_limited:
                 status = self.key_status[key]
                 if status["rate_limited"]:
-                    # Check if enough time has passed to retry
-                    if time.time() < status["retry_after"]:
-                        # Still rate limited, try next key
-                        if self.current_key_index == start_index:
-                            # All keys are exhausted, wait and use this one anyway
-                            wait_time = status["retry_after"] - time.time()
-                            self.logger.warning(
-                                f"All API keys rate limited, waiting {wait_time:.1f}s"
-                            )
-                            time.sleep(wait_time + 1)
-                            status["rate_limited"] = False
-                            return key
+                    if now < status["retry_after"]:
+                        if curr == start_index:
+                            # All keys in pool are currently rate limited
+                            if fallback_to_global and pool_tag != "GLOBAL" and "GLOBAL" in self.pools and self.pools["GLOBAL"]:
+                                if self.has_available_key("GLOBAL"):
+                                    return self.get_next_key(pool="GLOBAL", skip_rate_limited=True, fallback_to_global=False)
+
+                            # Wait for earliest key in pool
+                            earliest_key = min(keys, key=lambda k: self.key_status[k]["retry_after"])
+                            wait_time = max(0.1, self.key_status[earliest_key]["retry_after"] - time.time())
+                            if self.logger:
+                                self.logger.warning(
+                                    f"All API keys in pool '{pool_tag}' rate limited, waiting {wait_time:.1f}s"
+                                )
+                            time.sleep(wait_time + 0.1)
+                            self.key_status[earliest_key]["rate_limited"] = False
+                            return earliest_key
                         continue
                     else:
-                        # Rate limit has expired, clear it and use this key
                         status["rate_limited"] = False
-                        self.logger.info(f"Key recovered from rate limit")
-            
+                        if self.logger:
+                            self.logger.info(f"Key {key[:8]}... recovered from rate limit")
+
             return key
 
     ########################################################
@@ -100,54 +178,47 @@ class ApiKeyManager:
     def record_rate_limit(self, key, wait_seconds=None):
         """
         Record a rate limit error for a key.
-        
-        Args:
-            key: API key that was rate limited
-            wait_seconds: Seconds to wait before retry (from API response if available)
         """
         status = self.key_status[key]
         status["total_rate_limits"] += 1
         status["rate_limited"] = True
         status["failed_attempts"] += 1
-        
+
         if wait_seconds:
-            # Use API's suggested wait time
             status["retry_after"] = time.time() + wait_seconds
-            self.logger.warning(
-                f"Rate limited (key {key[:8]}...), waiting {wait_seconds}s"
-            )
+            if self.logger:
+                self.logger.warning(
+                    f"Rate limited (key {key[:8]}...), waiting {wait_seconds}s"
+                )
         else:
-            # Use exponential backoff
-            backoff = self.settings.retry_backoff_base ** status["failed_attempts"]
+            base = getattr(self.settings, "retry_backoff_base", 2) if self.settings else 2
+            backoff = base ** status["failed_attempts"]
             status["retry_after"] = time.time() + backoff
-            self.logger.warning(
-                f"Rate limited (key {key[:8]}...), backing off {backoff}s (attempt {status['failed_attempts']})"
-            )
+            if self.logger:
+                self.logger.warning(
+                    f"Rate limited (key {key[:8]}...), backing off {backoff}s (attempt {status['failed_attempts']})"
+                )
 
     ########################################################
 
     def record_failure(self, key, error_code=None):
-        """
-        Record a request failure.
-        
-        Args:
-            key: API key that failed
-            error_code: Torn API error code if available
-        """
+        """Record a request failure."""
         status = self.key_status[key]
         status["failed_attempts"] += 1
         status["total_requests"] += 1
 
     ########################################################
 
-    def get_status(self):
-        """Get summary of all keys and their status."""
+    def get_status(self, pool: str | None = None):
+        """Get summary of all keys (or pool keys) and their status."""
+        _, keys = self._resolve_pool_keys(pool) if pool else ("ALL", self.pools.get("ALL", self.api_keys))
         summary = []
-        for key in self.api_keys:
+        now = time.time()
+        for key in keys:
             status = self.key_status[key]
-            is_limited = status["rate_limited"]
-            time_until_retry = max(0, status["retry_after"] - time.time())
-            
+            is_limited = status["rate_limited"] and now < status["retry_after"]
+            time_until_retry = max(0, status["retry_after"] - now)
+
             summary.append({
                 "key": f"{key[:12]}...",
                 "rate_limited": is_limited,
@@ -155,23 +226,25 @@ class ApiKeyManager:
                 "total_requests": status["total_requests"],
                 "total_rate_limits": status["total_rate_limits"],
             })
-        
+
         return summary
 
     ########################################################
 
-    def log_status(self):
+    def log_status(self, pool: str | None = None):
         """Log current status of all API keys."""
-        status = self.get_status()
+        status = self.get_status(pool=pool)
         available_keys = sum(1 for s in status if not s["rate_limited"])
-        
-        self.logger.info(f"API Key Status: {available_keys}/{len(self.api_keys)} available")
-        for s in status:
-            if s["rate_limited"]:
-                self.logger.info(
-                    f"  Key {s['key']} - RATE LIMITED (retry in {s['time_until_retry']})"
-                )
-            else:
-                self.logger.info(
-                    f"  Key {s['key']} - {s['total_requests']} req, {s['total_rate_limits']} limits"
-                )
+
+        if self.logger:
+            pool_label = f" (pool {pool})" if pool else ""
+            self.logger.info(f"API Key Status{pool_label}: {available_keys}/{len(status)} available")
+            for s in status:
+                if s["rate_limited"]:
+                    self.logger.info(
+                        f"  Key {s['key']} - RATE LIMITED (retry in {s['time_until_retry']})"
+                    )
+                else:
+                    self.logger.info(
+                        f"  Key {s['key']} - {s['total_requests']} req, {s['total_rate_limits']} limits"
+                    )

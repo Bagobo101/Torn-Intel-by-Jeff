@@ -52,6 +52,13 @@ def build_parser():
     )
 
     sync.add_argument(
+        "--faction",
+        type=str,
+        default=None,
+        help="Faction tag to target (e.g. GTS, GTH, all). Defaults to configured default faction."
+    )
+
+    sync.add_argument(
         "--pages",
         type=int,
         default=50,
@@ -205,6 +212,13 @@ def build_parser():
              "oc_cpr: OC checkpoint pass rate summary against rules. "
              "oc_outside: current faction members not assigned to active OCs. "
              "oc_delays: active and recent OC delays caused by flying members."
+    )
+
+    report.add_argument(
+        "--faction",
+        type=str,
+        default=None,
+        help="Faction tag to filter reports (e.g. GTS, GTH). Defaults to all or default faction."
     )
 
     report.add_argument(

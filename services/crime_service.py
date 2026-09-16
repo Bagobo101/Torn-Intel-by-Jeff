@@ -15,20 +15,34 @@ class CrimeService:
 
     #######################################################
 
-    def fetch_active_slots(self):
+    def _resolve_faction_meta(self, faction=None):
+        settings = getattr(self.gateway, "settings", None)
+        if settings:
+            cfg = settings.get_faction(faction)
+            if cfg:
+                return cfg.tag, cfg.faction_id
+        tag = str(faction).strip().upper() if faction else "GTS"
+        return tag, None
 
-        snapshot = self.fetch_snapshot()
+    def fetch_active_slots(self, faction=None):
+
+        snapshot = self.fetch_snapshot(faction=faction)
         return snapshot["active_slots"]
 
     #######################################################
 
-    def fetch_snapshot(self):
+    def fetch_snapshot(self, faction=None):
 
-        response, has_members = self._fetch_crime_response()
+        faction_tag, faction_id = self._resolve_faction_meta(faction)
+        response, has_members = self._fetch_crime_response(pool=faction_tag)
         item_names = self._get_item_name_map()
 
         if not isinstance(response, dict):
             return {
+                "ok": False,
+                "error": "Invalid response from Torn API",
+                "faction_tag": faction_tag,
+                "faction_id": faction_id,
                 "members": [],
                 "active_slots": [],
                 "cpr_rows": [],
@@ -36,15 +50,22 @@ class CrimeService:
             }
 
         if response.get("error"):
-            self.logger.error(f"Crime API error: {response['error']}")
+            self.logger.error(f"Crime API error ({faction_tag}): {response['error']}")
             return {
+                "ok": False,
+                "error": str(response["error"]),
+                "faction_tag": faction_tag,
+                "faction_id": faction_id,
                 "members": [],
                 "active_slots": [],
                 "cpr_rows": [],
                 "crime_status_rows": [],
             }
 
-        members = CrimeParser.parse_members(response) if has_members else self.fetch_roster_members()
+        members = CrimeParser.parse_members(response, faction_id=faction_id, faction_tag=faction_tag) if has_members else self.fetch_roster_members(faction=faction)
+        if not members:
+            members = self.fetch_roster_members(faction=faction)
+
         member_names = {
             int(member["user_id"]): member["user_name"]
             for member in members
@@ -56,57 +77,64 @@ class CrimeService:
             member_names=member_names,
             allowed_statuses={"recruiting", "planning"},
             item_names=item_names,
+            faction_id=faction_id,
+            faction_tag=faction_tag,
         )
 
         return {
+            "ok": bool(members),
+            "faction_tag": faction_tag,
+            "faction_id": faction_id,
             "members": members,
             "active_slots": active_slots,
-            "cpr_rows": CrimeParser.parse_cpr_rows(active_slots),
-            "crime_status_rows": CrimeParser.parse_crime_status_rows(response),
+            "cpr_rows": CrimeParser.parse_cpr_rows(active_slots, faction_id=faction_id, faction_tag=faction_tag),
+            "crime_status_rows": CrimeParser.parse_crime_status_rows(response, faction_id=faction_id, faction_tag=faction_tag),
         }
 
     #######################################################
 
-    def _fetch_crime_response(self):
+    def _fetch_crime_response(self, pool="default"):
 
-        response = self.gateway.faction_basic_crimes_members_v2(category="available,completed")
+        response = self.gateway.faction_basic_crimes_members_v2(category="available,completed", pool=pool)
 
         # Fallback if combined endpoint is unavailable.
         if not isinstance(response, dict) or response.get("error"):
-            response = self.gateway.faction_crimes_v2(category="available,completed")
+            response = self.gateway.faction_crimes_v2(category="available,completed", pool=pool)
             return response, False
 
         return response, True
 
     #######################################################
 
-    def fetch_cpr_rows(self):
+    def fetch_cpr_rows(self, faction=None):
 
-        snapshot = self.fetch_snapshot()
+        snapshot = self.fetch_snapshot(faction=faction)
 
         return snapshot["active_slots"], snapshot["cpr_rows"]
 
     #######################################################
 
-    def fetch_roster_members(self):
+    def fetch_roster_members(self, faction=None):
 
-        response = self.gateway.faction_basic_crimes_members_v2(category="available,completed")
-        members = CrimeParser.parse_members(response)
+        faction_tag, faction_id = self._resolve_faction_meta(faction)
+        response = self.gateway.faction_basic_crimes_members_v2(category="available,completed", pool=faction_tag)
+        members = CrimeParser.parse_members(response, faction_id=faction_id, faction_tag=faction_tag)
 
         if members:
             return members
 
         # Fallback for keys that cannot access the combined v2 endpoint.
-        response = self.gateway.faction_basic()
-        return CrimeParser.parse_members(response)
+        response = self.gateway.faction_basic(pool=faction_tag)
+        return CrimeParser.parse_members(response, faction_id=faction_id, faction_tag=faction_tag)
 
     #######################################################
 
-    def backfill_completed_slots(self, pages=50):
+    def backfill_completed_slots(self, pages=50, faction=None):
         """
         Walk completed crimes pages for historical CPR accumulation.
         """
-        member_names = self._get_member_name_map()
+        faction_tag, faction_id = self._resolve_faction_meta(faction)
+        member_names = self._get_member_name_map(faction=faction)
         item_names = self._get_item_name_map()
         all_slots = []
 
@@ -116,6 +144,7 @@ class CrimeService:
                 category="completed",
                 offset=offset,
                 limit=100,
+                pool=faction_tag,
             )
 
             if not isinstance(response, dict) or response.get("error"):
@@ -126,6 +155,8 @@ class CrimeService:
                 member_names=member_names,
                 allowed_statuses={"*"},
                 item_names=item_names,
+                faction_id=faction_id,
+                faction_tag=faction_tag,
             )
 
             raw_crimes = response.get("crimes", [])
@@ -143,11 +174,11 @@ class CrimeService:
 
     #######################################################
 
-    def _get_member_name_map(self):
+    def _get_member_name_map(self, faction=None):
 
         return {
             int(member["user_id"]): member["user_name"]
-            for member in self.fetch_roster_members()
+            for member in self.fetch_roster_members(faction=faction)
         }
 
     #######################################################

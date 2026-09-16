@@ -31,26 +31,44 @@ class AttackSync(BaseSync):
 
         self.repo = AttackRepository(services.database)
 
-        if not services.database.table_exists(Attack.table_name):
-
-            SchemaBuilder(
-                services.database,
-                services.logger
-            ).create(Attack)
+        SchemaBuilder(
+            services.database,
+            services.logger
+        ).create(Attack)
 
     #######################################################
 
-    def sync(self, mode="backfill", filters=None, **kwargs):
+    def _resolve_faction_meta(self, faction=None):
+        settings = self.services.settings
+        if settings:
+            cfg = settings.get_faction(faction)
+            if cfg:
+                return cfg.faction_id, cfg.tag
+        return settings.faction_id if settings else None, "GTS"
+
+    def sync(self, mode="backfill", filters=None, faction=None, **kwargs):
+
+        if str(faction or "").strip().lower() == "all":
+            total = 0
+            for f in self.services.settings.list_factions():
+                self.logger.info(f"Syncing attacks for faction {f.tag} ({f.name})...")
+                total += self._sync_one_faction(mode=mode, filters=filters, faction=f.tag, **kwargs)
+            return total
+
+        return self._sync_one_faction(mode=mode, filters=filters, faction=faction, **kwargs)
+
+    def _sync_one_faction(self, mode="backfill", filters=None, faction=None, **kwargs):
 
         if mode == "backfill":
             return self._backfill(
                 filters,
                 from_timestamp=kwargs.get("from_timestamp"),
                 to_timestamp=kwargs.get("to_timestamp"),
+                faction=faction,
             )
 
         if mode == "live":
-            return self._live(filters)
+            return self._live(filters, faction=faction)
 
         raise ValueError(
             f"Unknown sync mode for attacks: '{mode}'"
@@ -58,19 +76,13 @@ class AttackSync(BaseSync):
 
     #######################################################
 
-    def _backfill(self, filters, from_timestamp=None, to_timestamp=None):
+    def _backfill(self, filters, from_timestamp=None, to_timestamp=None, faction=None):
         """
         Walk backward through attack history, importing any records not yet synced.
-        
-        If to_timestamp is provided, start from that point and walk backward.
-        If from_timestamp is provided, stop when we reach it (lower bound).
-        
-        Unlike live mode, this continues through the entire history,
-        skipping records that already exist instead of stopping.
         """
-
+        faction_id, faction_tag = self._resolve_faction_meta(faction)
         total = 0
-        checkpoint_key = "attacks_backfill"
+        checkpoint_key = f"attacks_backfill_{faction_tag}"
 
         start_to_timestamp = to_timestamp
         if start_to_timestamp is None:
@@ -78,7 +90,7 @@ class AttackSync(BaseSync):
             if resume_to is not None:
                 start_to_timestamp = int(resume_to)
                 self.logger.info(
-                    f"Resuming attacks backfill from checkpoint (to={start_to_timestamp})"
+                    f"Resuming attacks backfill [{faction_tag}] from checkpoint (to={start_to_timestamp})"
                 )
 
         # Seed resume anchor so failures before first fetched page still resume deterministically.
@@ -86,7 +98,7 @@ class AttackSync(BaseSync):
         self._set_resume_checkpoint(
             checkpoint_key,
             initial_anchor,
-            note="initial attacks backfill anchor",
+            note=f"initial attacks backfill anchor {faction_tag}",
         )
 
         try:
@@ -95,6 +107,7 @@ class AttackSync(BaseSync):
                 sort="DESC",
                 from_timestamp=from_timestamp,
                 to_timestamp=start_to_timestamp,
+                faction_tag=faction_tag,
             ):
                 if page:
                     next_to = min(a.timestamp_started for a in page) - 1
@@ -102,24 +115,26 @@ class AttackSync(BaseSync):
                         self._set_resume_checkpoint(
                             checkpoint_key,
                             next_to,
-                            note="auto-saved during attacks backfill",
+                            note=f"auto-saved during attacks backfill {faction_tag}",
                         )
 
                 for attack in page:
                     if self.repo.exists(attack.attack_id):
                         continue  # Skip duplicates, continue deeper history
 
+                    attack.faction_id = faction_id
+                    attack.faction_tag = faction_tag
                     self.repo.insert(attack)
                     total += 1
 
         except RateLimitError as exc:
             self.logger.warning(
-                f"Attacks backfill paused due to rate limit: {exc}"
+                f"Attacks backfill [{faction_tag}] paused due to rate limit: {exc}"
             )
             resume_to = self._get_resume_checkpoint(checkpoint_key)
             if resume_to is not None:
                 self.logger.info(
-                    f"Resume with: python main.py sync attacks --mode backfill --to {resume_to}"
+                    f"Resume with: python main.py sync attacks --mode backfill --to {resume_to} --faction {faction_tag}"
                 )
             return total
 
@@ -128,9 +143,10 @@ class AttackSync(BaseSync):
 
     #######################################################
 
-    def _live(self, filters):
+    def _live(self, filters, faction=None):
 
-        last_id = self.repo.latest_attack()
+        faction_id, faction_tag = self._resolve_faction_meta(faction)
+        last_id = self.repo.latest_attack(faction_tag=faction_tag)
 
         from_timestamp = None
 
@@ -147,6 +163,7 @@ class AttackSync(BaseSync):
             filters=filters,
             sort="ASC",
             from_timestamp=from_timestamp,
+            faction_tag=faction_tag,
         ):
 
             for attack in page:
@@ -154,6 +171,8 @@ class AttackSync(BaseSync):
                 if self.repo.exists(attack.attack_id):
                     continue
 
+                attack.faction_id = faction_id
+                attack.faction_tag = faction_tag
                 self.repo.insert(attack)
 
                 total += 1

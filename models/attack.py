@@ -13,6 +13,10 @@ class Attack(Model):
 
     code = Text()
 
+    faction_id = Integer()
+
+    faction_tag = Text()
+
     timestamp_started = Integer()
 
     timestamp_ended = Integer()

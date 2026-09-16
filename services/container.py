@@ -44,14 +44,19 @@ class ServiceContainer:
 
         self.events = EventBus()
 
-        # Create API key manager for multi-key support and rate limiting
+        # Create API key manager for multi-key support, multi-faction pools, and rate limiting
         self.key_manager = ApiKeyManager(
             api_keys=self.settings.api_keys,
             settings=self.settings,
             logger=self.logger,
         )
         
-        self.logger.info(f"Initialized with {len(self.settings.api_keys)} API key(s)")
+        pools_summary = ", ".join(
+            f"{tag}: {len(keys)} key(s)"
+            for tag, keys in self.key_manager.pools.items()
+            if tag != "ALL"
+        )
+        self.logger.info(f"Initialized API Key Manager ({pools_summary or 'no pools'})")
 
         self.http = HttpClient(
             timeout=self.settings.request_timeout,
