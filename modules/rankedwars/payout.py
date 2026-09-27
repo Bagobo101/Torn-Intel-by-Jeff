@@ -6,11 +6,17 @@ Calculates fair payouts based on war hits, assists, and parameters.
 """
 
 import time
+from decimal import Decimal, ROUND_HALF_UP
+
 from core.schema import SchemaBuilder
 from models.payout import Payout
 
 # Torn bonus milestones - these chain positions award extra respect
 BONUS_MILESTONES = {10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 25000, 50000}
+
+
+def round_currency(amount):
+    return int(Decimal(str(amount)).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
 
 
 class WarPayoutCalculator:
@@ -26,8 +32,9 @@ class WarPayoutCalculator:
             self.logger.info(f"Creating {Payout.table_name} table...")
             SchemaBuilder(self.database, self.logger).create(Payout)
     
-    def calculate_payouts(self, war_id, total_payout, xanax_cost, faction_cut_pct, 
-                         bounty_cost=0, per_assist=0, pay_outside_hits=0):
+    def calculate_payouts(self, war_id, total_payout, xanax_cost, faction_cut_pct,
+                         bounty_cost=0, per_assist=0, pay_outside_hits=0,
+                         per_outside_hit=0):
         """
         Calculate payouts for all players in a war.
         
@@ -39,6 +46,7 @@ class WarPayoutCalculator:
             bounty_cost: Bounty cost to deduct (flat)
             per_assist: Payment per assist (only on opposing faction)
             pay_outside_hits: Whether to pay for hits outside war (0=no, 1=yes)
+            per_outside_hit: Flat payment for each eligible outside hit
         
         Returns:
             Dict with summary and payouts for display
@@ -174,16 +182,44 @@ class WarPayoutCalculator:
         """, (our_faction_id, war_start, war_end, opponent_faction_id))
         
         assists_by_player = {}
+        player_names = {player_id: stats["name"] for player_id, stats in player_stats.items()}
         if assists_query:
             for row in assists_query:
                 assists_by_player[row["attacker_id"]] = row["assist_count"]
+                player_names[row["attacker_id"]] = row["attacker_name"]
+
+        outside_by_player = {}
+        if pay_outside_hits:
+            outside_query = self.database.select("""
+                SELECT attacker_id, attacker_name, COUNT(*) as outside_count,
+                       SUM(respect_gain) as outside_respect
+                FROM attacks
+                WHERE attacker_faction_id = ?
+                AND timestamp_started >= ?
+                AND timestamp_started <= ?
+                AND COALESCE(defender_faction_id, 0) != ?
+                AND result != 'Assist'
+                AND COALESCE(respect_gain, 0) > 0
+                GROUP BY attacker_id, attacker_name
+            """, (our_faction_id, war_start, war_end, opponent_faction_id))
+
+            for row in outside_query or []:
+                outside_by_player[row["attacker_id"]] = {
+                    "count": row["outside_count"],
+                    "respect": row["outside_respect"] or 0,
+                }
+                player_names[row["attacker_id"]] = row["attacker_name"]
         
         player_payouts = []
         total_assist_cost = 0
         
-        for player_id, stats in player_stats.items():
-            num_war_hits = stats["war_hits"]
-            num_assists = assists_by_player.get(player_id, 0)
+        contributor_ids = set(player_stats) | set(outside_by_player)
+        for player_id in contributor_ids:
+            stats = player_stats.get(player_id, {})
+            outside_stats = outside_by_player.get(player_id, {})
+            num_war_hits = stats.get("war_hits", 0)
+            num_assists = assists_by_player.get(player_id, 0) if player_id in player_stats else 0
+            num_outside = outside_stats.get("count", 0)
             num_bonus_hits = player_bonus_hits.get(player_id, 0)
             
             # Use actual database respect (no normalization or calibration)
@@ -195,12 +231,14 @@ class WarPayoutCalculator:
             
             player_payouts.append({
                 "player_id": player_id,
-                "player_name": stats["name"],
-                "num_hits": num_war_hits,
+                "player_name": player_names[player_id],
+                "num_hits": num_war_hits + num_outside,
                 "num_war_hits": num_war_hits,
                 "num_assists": num_assists,
                 "num_bonus_hits": num_bonus_hits,
+                "num_outside": num_outside,
                 "war_respect": war_respect,
+                "outside_respect": outside_stats.get("respect", 0),
                 "total_respect": war_respect,
             })
         
@@ -221,7 +259,9 @@ class WarPayoutCalculator:
         # Build final payouts with all details
         payouts = []
         for player_payout in player_payouts:
-            if player_payout["total_respect"] == 0 and player_payout["num_assists"] == 0:
+            if (player_payout["total_respect"] == 0
+                    and player_payout["num_assists"] == 0
+                    and player_payout["num_outside"] == 0):
                 continue  # Skip players with no contribution
             
             respect_pct = (player_payout["total_respect"] / total_war_respect) * 100 if total_war_respect > 0 else 0
@@ -229,9 +269,10 @@ class WarPayoutCalculator:
             
             # Assist payout (flat per assist)
             assist_payout = player_payout["num_assists"] * per_assist
+            outside_payout = player_payout["num_outside"] * per_outside_hit
             
             # Total player share
-            player_share = respect_share + assist_payout
+            player_share = round_currency(respect_share + assist_payout + outside_payout)
             
             payout_obj = {
                 "player_id": player_payout["player_id"],
@@ -240,14 +281,14 @@ class WarPayoutCalculator:
                 "num_war_hits": player_payout["num_war_hits"],
                 "num_assists": player_payout["num_assists"],
                 "num_bonus_hits": player_payout["num_bonus_hits"],
-                "num_outside": 0,
+                "num_outside": player_payout["num_outside"],
                 "war_respect": player_payout["war_respect"],
-                "outside_respect": 0,
+                "outside_respect": player_payout["outside_respect"],
                 "total_respect": player_payout["total_respect"],
                 "respect_pct": respect_pct,
                 "respect_share": respect_share,
                 "assist_payout": assist_payout,
-                "outside_payout": 0,
+                "outside_payout": outside_payout,
                 "player_share": player_share,
             }
             payouts.append(payout_obj)
@@ -267,9 +308,9 @@ class WarPayoutCalculator:
                 assist_count=payout_obj["num_assists"],
                 num_bonus_hits=payout_obj["num_bonus_hits"],
                 assist_payout=payout_obj["assist_payout"],
-                outside_hits=0,
-                outside_respect=0,
-                outside_payout=0,
+                outside_hits=payout_obj["num_outside"],
+                outside_respect=payout_obj["outside_respect"],
+                outside_payout=payout_obj["outside_payout"],
                 total_respect=payout_obj["total_respect"],
                 regular_respect=0,
                 chain_bonus_respect=0,
@@ -302,5 +343,7 @@ class WarPayoutCalculator:
             "dollar_per_respect": dollar_per_respect,
             "per_assist": per_assist,
             "pay_outside_hits": pay_outside_hits,
+            "per_outside_hit": per_outside_hit,
+            "total_outside_cost": sum(payout["outside_payout"] for payout in payouts),
             "payouts": payouts,
         }

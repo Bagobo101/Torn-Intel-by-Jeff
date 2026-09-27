@@ -380,6 +380,13 @@ def build_parser():
         help="Pay for hits outside war (1=yes, 0=no, default: 0)"
     )
 
+    report.add_argument(
+        "--per_outside_hit",
+        type=float,
+        default=0,
+        help="Flat payment per eligible outside hit (default: 0)"
+    )
+
     payout = sub.add_parser("payout")
 
     payout.add_argument(
@@ -437,6 +444,13 @@ def build_parser():
         default=0,
         choices=[0, 1],
         help="Pay for hits outside war (1=yes, 0=no, default: 0)"
+    )
+
+    payout.add_argument(
+        "--per_outside_hit",
+        type=float,
+        default=0,
+        help="Flat payment per eligible outside hit (default: 0)"
     )
 
     payout_csv = sub.add_parser("payout_csv")
@@ -505,6 +519,13 @@ def build_parser():
         help="Pay for hits outside war (1=yes, 0=no, default: 0)"
     )
 
+    payout_csv.add_argument(
+        "--per_outside_hit",
+        type=float,
+        default=0,
+        help="Flat payment per eligible outside hit (default: 0)"
+    )
+
     watch = sub.add_parser("watch")
 
     watch.add_argument(
@@ -531,6 +552,14 @@ def build_parser():
         type=int,
         default=None,
         help="Total seconds to run (None = infinite)"
+    )
+
+    watch.add_argument(
+        "--faction",
+        type=str,
+        default="all",
+        help="Faction tag to watch (e.g. GTS, GTH), or 'all' to watch every configured faction each cycle (default: all). "
+             "Not supported for revives, which is shared across factions."
     )
 
     shoplifting = sub.add_parser("shoplifting")

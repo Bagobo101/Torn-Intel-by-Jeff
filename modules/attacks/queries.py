@@ -21,6 +21,9 @@ class AttackQueries:
         defender_name=None,
         result=None,
         chain=None,
+        from_timestamp=None,
+        to_timestamp=None,
+        faction=None,
         limit=25,
         order="DESC",
     ):
@@ -29,6 +32,8 @@ class AttackQueries:
 
         All filters are ANDed together. Returns up to `limit` rows,
         newest first by default (order="DESC"), oldest first with order="ASC".
+        `faction` filters by the faction_tag the attack was synced under
+        (e.g. GTS, GTH), since each faction syncs and stores its own attacks.
         """
         conditions = []
         params = []
@@ -38,16 +43,16 @@ class AttackQueries:
             params.append(attacker_id)
 
         if attacker_name is not None:
-            conditions.append("LOWER(attacker_name) = LOWER(?)")
-            params.append(attacker_name)
+            conditions.append("LOWER(attacker_name) LIKE LOWER(?)")
+            params.append(f"%{attacker_name}%")
 
         if defender_id is not None:
             conditions.append("defender_id = ?")
             params.append(defender_id)
 
         if defender_name is not None:
-            conditions.append("LOWER(defender_name) = LOWER(?)")
-            params.append(defender_name)
+            conditions.append("LOWER(defender_name) LIKE LOWER(?)")
+            params.append(f"%{defender_name}%")
 
         if result is not None:
             conditions.append("LOWER(result) = LOWER(?)")
@@ -56,6 +61,18 @@ class AttackQueries:
         if chain is not None:
             conditions.append("chain = ?")
             params.append(chain)
+
+        if from_timestamp is not None:
+            conditions.append("timestamp_started >= ?")
+            params.append(int(from_timestamp))
+
+        if to_timestamp is not None:
+            conditions.append("timestamp_started <= ?")
+            params.append(int(to_timestamp))
+
+        if faction:
+            conditions.append("LOWER(faction_tag) = LOWER(?)")
+            params.append(str(faction))
 
         where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
         params.append(limit)
@@ -71,7 +88,8 @@ class AttackQueries:
                 result,
                 respect_gain,
                 respect_loss,
-                chain
+                chain,
+                faction_tag
             FROM attacks
             {where}
             ORDER BY timestamp_started {order}

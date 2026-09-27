@@ -16,7 +16,7 @@ class SyncScheduler:
         self.engine = engine
         self.logger = logger
 
-    def run_continuous(self, module, catch_up_cooldown=5, duration_seconds=None):
+    def run_continuous(self, module, catch_up_cooldown=5, duration_seconds=None, faction=None):
         """
         Run live sync aggressively until caught up, then poll for new data.
 
@@ -30,17 +30,20 @@ class SyncScheduler:
             module: Module name (e.g., 'attacks')
             catch_up_cooldown: Seconds to wait between polls when caught up (default: 5s)
             duration_seconds: Total seconds to run (None = infinite)
+            faction: Faction tag to watch, or 'all' to cover every configured faction each
+                cycle (default). Keeps each faction's live data separated by faction_tag.
 
         Usage:
             scheduler = SyncScheduler(engine, logger)
-            scheduler.run_continuous('attacks', catch_up_cooldown=10)
+            scheduler.run_continuous('attacks', catch_up_cooldown=10, faction='all')
         """
         start_time = time.time()
         run_count = 0
         consecutive_empty = 0
 
+        faction_label = faction or "all"
         self.logger.info(
-            f"🔄 Starting aggressive {module} sync (cooldown: {catch_up_cooldown}s when caught up)"
+            f"🔄 Starting aggressive {module} sync [{faction_label}] (cooldown: {catch_up_cooldown}s when caught up)"
         )
 
         try:
@@ -59,7 +62,7 @@ class SyncScheduler:
                 timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
                 try:
-                    imported = self.engine.sync(module, mode="live")
+                    imported = self.engine.sync(module, mode="live", faction=faction)
                     
                     if imported > 0:
                         # Got new data - reset empty counter and keep going

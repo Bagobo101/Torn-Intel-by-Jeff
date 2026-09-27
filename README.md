@@ -66,10 +66,13 @@ TORN_DISCORD_BOT_PREFIX=!ti
 TORN_DISCORD_GUILD_ID=123456789012345678
 TORN_DISCORD_COMMAND_TIMEOUT=180
 TORN_DISCORD_ENABLE_MESSAGE_CONTENT_INTENT=0
+TORN_DISCORD_BANKER_ROLE=Bankers
 TORN_DISCORD_REVIVE_CHANNEL_ID=
 TORN_DISCORD_REVIVE_POLL_SECONDS=20
 TORN_DISCORD_OC_DELAY_CHANNEL_ID=
 TORN_DISCORD_OC_DELAY_POLL_SECONDS=60
+TORN_DISCORD_ATTACKS_AUTOSYNC=1
+TORN_DISCORD_ATTACKS_POLL_SECONDS=15
 ```
 
 Notes:
@@ -94,7 +97,9 @@ Discord commands:
 - Slash: `/ti_report` for report-style commands with guided options + autocomplete (includes war_payout summary/top/full/csv/image controls).
 - Slash: `/ti_war_payout` guided payout command for ranked wars with optional summary/top/full views and CSV/PNG exports.
 - Slash: `/ti_revives` guided revives search command.
-- Slash: `/add` link your Discord user to your Torn player ID.
+- Slash: `/add` link your Discord user to your Torn player ID. Omit `user_id` to search configured faction rosters for one exact display-name match; supply `user_id` manually if no unique match is found.
+- Slash: `/ti_withdraw` request a vault withdrawal; faction is determined by the caller's `Saints` or `Spartan` role, and the request alerts that faction role plus `TORN_DISCORD_BANKER_ROLE`.
+- Slash: `/ti_bank_channel` configure a shared bank channel or a separate channel for a faction.
 - Slash: `/revive` and `/r` request a revive for a target Torn ID after hospital-status API validation.
 - Slash: `/ti_revive_active` list active revive requests.
 - Slash: `/ti_revive_cancel` cancel your pending revive request.
@@ -114,6 +119,12 @@ Output formatting:
 - When a revive request is fulfilled, the posted request embed is auto-updated to green and shows the reviver name.
 - The Discord bot periodically runs `sync revives --mode live` + `revive_requests reconcile` while active Discord revive requests exist (interval controlled by `TORN_DISCORD_REVIVE_POLL_SECONDS`).
 - The Discord bot can also poll `sync crimes --mode live` and post OC delay start/resolve alerts for flying members when `TORN_DISCORD_OC_DELAY_CHANNEL_ID` or `/ti_oc_delay_channel` is configured.
+
+Bank withdrawal setup:
+- Set `FACTION_GTS_ROLE=Saints` and `FACTION_GTH_ROLE=Spartan` if the Discord role names differ from those defaults. Set `FACTION_GTH_NAME=Glory to Heroes` and configure the GTH ID/key pool.
+- Set `TORN_DISCORD_BANKER_ROLE` to the exact Discord role name that should be pinged on withdrawal requests (default: `Bankers`).
+- Each requester must run `/add user_id:<Torn player ID>` once. `/ti_withdraw amount:<amount>` will fail if the member has no faction role or has both faction roles.
+- The local listener must be running for the Torn userscript. For same-LAN/mobile access, start it with `python main.py revive_listener serve --host 0.0.0.0 --port 8765`. For remote access, use a running tunnel and replace its temporary trycloudflare URL in `scripts/tampermonkey/revive_request_endpoint.json`; trycloudflare URLs expire when their tunnel stops.
 
 Reaction roles:
 
@@ -195,6 +206,7 @@ Runs aggressively: pulls data as fast as possible until caught up, then polls at
 |------|---------|-------------|
 | `--cooldown <seconds>` | 5 | How long to wait between polls when fully caught up |
 | `--duration <seconds>` | ∞ | Total runtime limit (omit to run forever) |
+| `--faction <TAG\|all>` | all | Faction(s) to watch each cycle (e.g. GTS, GTH). `all` covers every configured faction, including any added later. |
 
 **Examples:**
 
@@ -205,6 +217,11 @@ python main.py watch attacks --cooldown 10
 # Run for 8 hours
 python main.py watch attacks --cooldown 10 --duration 28800
 ```
+
+While the Discord bot (`python main.py discord`) is running, attacks are also kept live automatically for every
+configured faction (GTS, GTH, and any future `FACTION_<TAG>_*` you add) via a built-in background task — you no
+longer need a separate `watch attacks` process just to keep attacks flowing. Poll interval:
+`TORN_DISCORD_ATTACKS_POLL_SECONDS` (default 15s). Disable with `TORN_DISCORD_ATTACKS_AUTOSYNC=0`.
 
 **Recommended for ongoing data collection.** Leave this running in a terminal to capture all future chain activity in real time.
 
@@ -528,6 +545,7 @@ python main.py payout rankedwars --war_id <id> --total_payout <$> [options]
 | `--faction_cut` | Faction cut percentage 0-100 (default: 0) |
 | `--per_assist` | Payment per assist on opposing faction (default: 0) |
 | `--pay_outside_hits` | Pay for hits outside war target (0=no, 1=yes, default: 0) |
+| `--per_outside_hit` | Flat payment per eligible outside hit (default: 0) |
 
 **How payouts are calculated:**
 
@@ -535,26 +553,27 @@ python main.py payout rankedwars --war_id <id> --total_payout <$> [options]
 2. Classify attacks:
    - **War hits**: attacks marked as `is_ranked_war=1` (contribute to respect pool)
    - **Assists**: hits on opposing faction (counted separately, flat $/assist)
-   - **Outside hits**: attacks not on opposing faction (optional, if `--pay_outside_hits 1`)
-3. Deduct all costs upfront: `(total - xanax - bounty - assist_costs)`
-4. Calculate distribution pool: `remaining × (1 - faction_cut%)`
+  - **Outside hits**: successful, non-assist attacks not on the opposing faction (optional, if `--pay_outside_hits 1`)
+3. Apply the faction cut to the total payout, then deduct xanax, bounty, and assist costs
+4. Calculate the war distribution pool from the remaining amount
 5. Distribute respect-based portion proportionally by player respect
 6. Add assist bonuses (flat amount per assist if on opposing faction)
-7. Add outside hit bonuses (if enabled, distributed by outside respect %)
+7. Add outside hit bonuses (`outside hits × per_outside_hit`) separately, without reducing the war distribution pool
 8. Cap chain bonuses at player's avg_respect_per_hit (prevents overpayment)
 9. Store full audit trail in payouts table
 
 **Example with all features:**
 
 ```bash
-# War with $50k pool, $5k xanax, $1k bounty, 20% cut, $50/assist
+# War with $50k pool, $5k xanax, $1k bounty, 20% cut, $50/assist, and $100/outside hit
 python main.py payout rankedwars --war_id 43153 --total_payout 50000 \
-  --xanax_cost 5000 --bounty_cost 1000 --faction_cut 20 --per_assist 50
+  --xanax_cost 5000 --bounty_cost 1000 --faction_cut 20 --per_assist 50 \
+  --pay_outside_hits 1 --per_outside_hit 100
 
 # Calculation:
 # - Costs deducted: $5k + $1k + (assists × $50) = pool reduced
 # - Remaining: (50k - 5k - 1k - assists_cost) × 0.80 = distribution pool
-# - Per-player: respect% × pool + (assists × $50) + outside%
+# - Per-player: respect% × pool + (assists × $50) + (outside hits × $100)
 ```
 
 **Output shows:**

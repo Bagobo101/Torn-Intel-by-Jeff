@@ -48,6 +48,30 @@ class AttackRepository(Repository):
 
     ##########################################################
 
+    def adopt_untagged(self, faction_tag, faction_id):
+        """
+        One-time repair for attacks synced before faction isolation existed.
+        Tags legacy rows (faction_tag IS NULL) that clearly belong to this
+        faction, based on the Torn faction_id appearing as attacker or defender.
+        Returns the number of rows adopted.
+        """
+        if not faction_tag or not faction_id:
+            return 0
+
+        cursor = self.db.execute(
+            """
+            UPDATE attacks
+            SET faction_tag = ?, faction_id = ?
+            WHERE faction_tag IS NULL
+              AND (attacker_faction_id = ? OR defender_faction_id = ?)
+            """,
+            (faction_tag, int(faction_id), int(faction_id), int(faction_id)),
+        )
+        self.db.commit()
+        return cursor.rowcount if cursor else 0
+
+    ##########################################################
+
     def by_chain(self, chain):
 
         return (

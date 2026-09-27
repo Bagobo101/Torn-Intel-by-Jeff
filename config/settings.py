@@ -24,14 +24,28 @@ if ENV_FILE.exists():
     load_dotenv(ENV_FILE)
 
 
+# Discord role that identifies members of each faction; override with FACTION_<TAG>_ROLE.
+DEFAULT_FACTION_ROLES = {
+    "GTS": "Saints",
+    "GTH": "Spartan",
+}
+
+
 class FactionConfig:
     """Configuration for a specific tracked faction."""
 
-    def __init__(self, tag: str, name: str = "", faction_id: int | None = None, api_keys: list[str] | None = None):
+    def __init__(self, tag: str, name: str = "", faction_id: int | None = None, api_keys: list[str] | None = None, role_name: str = ""):
         self.tag = tag.upper().strip()
         self.name = name.strip() or self.tag
         self.faction_id = int(faction_id) if faction_id else None
         self.api_keys = [str(k).strip() for k in (api_keys or []) if str(k).strip()]
+        self.role_name = (
+            role_name.strip()
+            or os.environ.get(f"FACTION_{self.tag}_ROLE", "").strip()
+            or DEFAULT_FACTION_ROLES.get(self.tag, "")
+        )
+        # Discord role pinged for this faction's bank requests; falls back to TORN_DISCORD_BANKER_ROLE.
+        self.banker_role_name = os.environ.get(f"FACTION_{self.tag}_BANKER_ROLE", "").strip()
 
     def __repr__(self):
         return f"<FactionConfig tag={self.tag} id={self.faction_id} name={self.name} keys={len(self.api_keys)}>"
@@ -124,12 +138,17 @@ class Settings:
         self.discord_enable_message_content_intent = os.environ.get(
             "TORN_DISCORD_ENABLE_MESSAGE_CONTENT_INTENT", "0"
         ).strip().lower() in ("1", "true", "yes", "on")
+        self.discord_banker_role = os.environ.get("TORN_DISCORD_BANKER_ROLE", "Bankers").strip()
         revive_channel_env = os.environ.get("TORN_DISCORD_REVIVE_CHANNEL_ID", "").strip()
         self.discord_revive_channel_id = int(revive_channel_env) if revive_channel_env else None
         self.discord_revive_poll_seconds = int(os.environ.get("TORN_DISCORD_REVIVE_POLL_SECONDS", "20"))
         oc_delay_channel_env = os.environ.get("TORN_DISCORD_OC_DELAY_CHANNEL_ID", "").strip()
         self.discord_oc_delay_channel_id = int(oc_delay_channel_env) if oc_delay_channel_env else None
         self.discord_oc_delay_poll_seconds = int(os.environ.get("TORN_DISCORD_OC_DELAY_POLL_SECONDS", "60"))
+        self.discord_attacks_poll_seconds = int(os.environ.get("TORN_DISCORD_ATTACKS_POLL_SECONDS", "15"))
+        self.discord_attacks_autosync = os.environ.get(
+            "TORN_DISCORD_ATTACKS_AUTOSYNC", "1"
+        ).strip().lower() in ("1", "true", "yes", "on")
 
     #######################################################
 
@@ -147,7 +166,7 @@ class Settings:
         # Default faction names
         default_names = {
             "GTS": "Glory to Saints",
-            "GTH": "Glory to Hades",
+            "GTH": "Glory to Heroes",
         }
 
         for tag in discovered_tags:

@@ -18,6 +18,7 @@ import time
 import uuid
 import re
 import asyncio
+import functools
 import json
 import io
 import csv
@@ -32,6 +33,14 @@ from urllib.error import HTTPError
 
 
 from config.settings import Settings
+from repositories.bank_request_repository import (
+    BANK_REQUEST_TIMEOUT_SECONDS,
+    BANK_REQUESTS_DDL,
+    BANK_VERIFY_WINDOW_SECONDS,
+    MAX_BANK_AMOUNT,
+    bank_request_migrations,
+)
+from services.bank_balance import BankBalanceError, find_vault_payment, resolve_withdrawal
 from services.shoplifting_watcher import ShopliftingWatcher
 
 
@@ -39,6 +48,8 @@ EMBED_TEXT_LIMIT = 3900
 DEFAULT_TAIL_LINES = 80
 LONG_RUNNING_COMMANDS = {"watch", "revive_listener"}
 REVIVE_SOURCE = "discord-bot"
+BANK_CANCEL_PREFIX = "ti_bank_cancel:"
+BANK_FULFILL_PREFIX = "ti_bank_fulfill:"
 
 REPORT_TYPES_BY_MODULE = {
     "attacks": ["chain_hit", "chain_stats", "chain_leaderboard", "chain_player"],
@@ -48,6 +59,63 @@ REPORT_TYPES_BY_MODULE = {
     "crimes": ["oc_item_audit", "oc_cpr", "oc_outside", "oc_delays"],
     "revives": ["requests_list"],
 }
+
+
+def _factions_for_member_roles(settings, roles):
+    role_names = {str(getattr(role, "name", "")).casefold() for role in roles}
+    return [
+        faction
+        for faction in settings.list_factions()
+        if faction.role_name and faction.role_name.casefold() in role_names
+    ]
+
+
+def _torn_identity_candidates(user):
+    """Return (id embedded as 'Name [123]', candidate Torn names) from a Discord user's names."""
+    names = []
+    for raw in (
+        getattr(user, "display_name", None),
+        getattr(user, "nick", None),
+        getattr(user, "global_name", None),
+        getattr(user, "name", None),
+    ):
+        text = str(raw or "").strip()
+        if not text:
+            continue
+        id_match = re.search(r"\[(\d{1,10})\]", text)
+        if id_match:
+            return int(id_match.group(1)), names
+        cleaned = re.sub(r"\[[^\]]*\]|\([^)]*\)", " ", text).split("|")[0].strip()
+        for candidate in (text, cleaned):
+            if candidate and candidate.casefold() not in {name.casefold() for name in names}:
+                names.append(candidate)
+    return None, names
+
+
+def _torn_member_ids_for_name(response, display_name: str):
+    target = str(display_name or "").strip().casefold()
+    if not target or not isinstance(response, dict):
+        return set()
+
+    members = response.get("members")
+    if isinstance(members, dict):
+        entries = members.items()
+    elif isinstance(members, list):
+        entries = ((member.get("id"), member) for member in members if isinstance(member, dict))
+    else:
+        return set()
+
+    matches = set()
+    for id_value, member in entries:
+        if not isinstance(member, dict) or str(member.get("name") or "").strip().casefold() != target:
+            continue
+        try:
+            user_id = int(member.get("id") or id_value)
+        except (TypeError, ValueError):
+            continue
+        if user_id > 0:
+            matches.add(user_id)
+    return matches
 
 
 @dataclass
@@ -402,6 +470,72 @@ class ReviveDiscordStore:
 
     #######################################################
 
+    def _ensure_bank_table(self, conn):
+        conn.execute(BANK_REQUESTS_DDL)
+        columns = [str(column[1]) for column in conn.execute("PRAGMA table_info(bank_requests)").fetchall()]
+        migrations = bank_request_migrations(columns)
+        for statement in migrations:
+            conn.execute(statement)
+        if migrations:
+            conn.commit()
+
+    def create_bank_request(
+        self,
+        *,
+        requester_id: int,
+        requester_name: str,
+        amount: int,
+        faction_tag: str,
+        requested_text: str | None = None,
+        balance: int | None = None,
+    ):
+        amount = int(amount)
+        if amount <= 0 or amount > MAX_BANK_AMOUNT:
+            raise ValueError("amount_out_of_range")
+        requester_name = str(requester_name or "").strip()
+        if not requester_name:
+            raise ValueError("requester_name_required")
+
+        now = int(time.time())
+        request_id = f"bankreq:{int(time.time() * 1000)}:{int(requester_id)}"
+        conn = self._connect()
+        try:
+            self._ensure_bank_table(conn)
+            conn.execute(
+                """
+                INSERT INTO bank_requests (
+                    request_id, requester_id, requester_name, amount, faction_tag,
+                    source, notes, status, raw_payload, created_at, requested_text, balance
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)
+                """,
+                (
+                    request_id,
+                    int(requester_id),
+                    requester_name[:64],
+                    amount,
+                    str(faction_tag).upper()[:32],
+                    "discord-withdraw",
+                    "Requested via /ti_withdraw",
+                    json.dumps({"source": "discord-withdraw", "faction_tag": faction_tag})[:4000],
+                    now,
+                    str(requested_text or amount)[:32],
+                    int(balance) if balance is not None else None,
+                ),
+            )
+            conn.commit()
+            return {
+                "request_id": request_id,
+                "requester_id": int(requester_id),
+                "requester_name": requester_name[:64],
+                "amount": amount,
+                "faction_tag": str(faction_tag).upper()[:32],
+                "created_at": now,
+            }
+        finally:
+            conn.close()
+
+    #######################################################
+
     def create_request(self, discord_user_id: int, torn_user_id: int | None, target_id: int, target_name: str | None, requester_name: str):
         now = int(time.time())
         request_id = f"revreq:{int(time.time() * 1000)}:{target_id}"
@@ -724,6 +858,168 @@ class ReviveDiscordStore:
         finally:
             conn.close()
 
+    #######################################################
+
+    def list_unposted_bank_requests(self, limit: int = 50):
+        conn = self._connect()
+        try:
+            self._ensure_bank_table(conn)
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM bank_requests
+                WHERE discord_posted_at IS NULL AND status = 'pending'
+                ORDER BY created_at ASC
+                LIMIT ?
+                """,
+                (int(limit),),
+            ).fetchall()
+            return [dict(row) for row in rows]
+        finally:
+            conn.close()
+
+    #######################################################
+
+    def get_bank_request(self, request_id: str):
+        conn = self._connect()
+        try:
+            self._ensure_bank_table(conn)
+            row = conn.execute(
+                "SELECT * FROM bank_requests WHERE request_id = ? LIMIT 1",
+                (str(request_id),),
+            ).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+    #######################################################
+
+    def resolve_bank_request(self, request_id: str, status: str, resolved_by: str, note: str | None = None):
+        """Move an open (pending/in_process) request to a final status; False if already resolved."""
+        conn = self._connect()
+        try:
+            self._ensure_bank_table(conn)
+            cursor = conn.execute(
+                """
+                UPDATE bank_requests
+                SET status = ?, resolved_at = ?, resolved_by = ?, resolution_note = ?
+                WHERE request_id = ? AND status IN ('pending', 'in_process')
+                """,
+                (str(status), int(time.time()), str(resolved_by)[:100], (note or None) and str(note)[:500], str(request_id)),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+        finally:
+            conn.close()
+
+    #######################################################
+
+    def claim_bank_request(self, request_id: str, claimed_by: str):
+        conn = self._connect()
+        try:
+            self._ensure_bank_table(conn)
+            cursor = conn.execute(
+                """
+                UPDATE bank_requests
+                SET status = 'in_process', claimed_by = ?, claimed_at = ?, resolution_note = NULL
+                WHERE request_id = ? AND status = 'pending'
+                """,
+                (str(claimed_by)[:100], int(time.time()), str(request_id)),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+        finally:
+            conn.close()
+
+    #######################################################
+
+    def release_bank_request(self, request_id: str, note: str):
+        """Return an in-process request to pending (e.g. no payment found in the logs)."""
+        conn = self._connect()
+        try:
+            self._ensure_bank_table(conn)
+            cursor = conn.execute(
+                """
+                UPDATE bank_requests
+                SET status = 'pending', resolution_note = ?
+                WHERE request_id = ? AND status = 'in_process'
+                """,
+                (str(note)[:500], str(request_id)),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+        finally:
+            conn.close()
+
+    #######################################################
+
+    def list_bank_requests_by_status(self, status: str, limit: int = 50):
+        conn = self._connect()
+        try:
+            self._ensure_bank_table(conn)
+            rows = conn.execute(
+                "SELECT * FROM bank_requests WHERE status = ? ORDER BY created_at ASC LIMIT ?",
+                (str(status), int(limit)),
+            ).fetchall()
+            return [dict(row) for row in rows]
+        finally:
+            conn.close()
+
+    #######################################################
+
+    def get_discord_user_for_torn_id(self, torn_user_id: int):
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                """
+                SELECT discord_user_id FROM discord_user_links
+                WHERE torn_user_id = ?
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """,
+                (int(torn_user_id),),
+            ).fetchone()
+            return int(row["discord_user_id"]) if row else None
+        finally:
+            conn.close()
+
+    #######################################################
+
+    def list_stale_bank_requests(self, older_than: int, limit: int = 50):
+        conn = self._connect()
+        try:
+            self._ensure_bank_table(conn)
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM bank_requests
+                WHERE status = 'pending' AND created_at < ?
+                ORDER BY created_at ASC
+                LIMIT ?
+                """,
+                (int(older_than), int(limit)),
+            ).fetchall()
+            return [dict(row) for row in rows]
+        finally:
+            conn.close()
+
+    #######################################################
+
+    def mark_bank_request_posted(self, request_id: str, channel_id: int, message_id: int):
+        conn = self._connect()
+        try:
+            conn.execute(
+                """
+                UPDATE bank_requests
+                SET discord_posted_at = ?, channel_id = ?, message_id = ?
+                WHERE request_id = ?
+                """,
+                (int(time.time()), str(channel_id), str(message_id), str(request_id)),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
 
 class CliBridge:
 
@@ -983,6 +1279,7 @@ def _build_report_command(
     bounty_cost=0,
     per_assist=0,
     pay_outside_hits=0,
+    per_outside_hit=0,
     faction=None,
 ):
     parts = ["report", module, report_type]
@@ -1013,6 +1310,7 @@ def _build_report_command(
         parts.extend(["--bounty_cost", str(bounty_cost or 0)])
         parts.extend(["--per_assist", str(per_assist or 0)])
         parts.extend(["--pay_outside_hits", str(int(pay_outside_hits or 0))])
+        parts.extend(["--per_outside_hit", str(per_outside_hit or 0)])
 
     if module == "revives" and report_type == "requests_list":
         parts = ["revive_requests", "list"]
@@ -1034,6 +1332,7 @@ def _build_war_payout_command(
     bounty_cost=0,
     per_assist=0,
     pay_outside_hits=0,
+    per_outside_hit=0,
 ):
     parts = [
         "payout",
@@ -1052,6 +1351,8 @@ def _build_war_payout_command(
         str(per_assist or 0),
         "--pay_outside_hits",
         str(int(pay_outside_hits or 0)),
+        "--per_outside_hit",
+        str(per_outside_hit or 0),
     ]
     return " ".join(shlex.quote(p) for p in parts)
 
@@ -1064,6 +1365,56 @@ def _build_revives_search_command(reviver=None, target=None, result=None, limit=
         parts.extend(["--target-name", str(target)])
     if result:
         parts.extend(["--result", str(result)])
+    if limit is not None:
+        parts.extend(["--limit", str(limit)])
+    if oldest:
+        parts.append("--oldest")
+    return " ".join(shlex.quote(p) for p in parts)
+
+
+def _parse_when_to_timestamp(text):
+    """Parse a flexible date/time string into a unix timestamp, or return None."""
+    value = str(text or "").strip()
+    if not value:
+        return None
+    if value.isdigit():
+        return int(value)
+    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d", "%m-%d-%Y %H:%M", "%m-%d-%Y", "%m/%d/%Y %H:%M", "%m/%d/%Y"):
+        try:
+            return int(datetime.strptime(value, fmt).timestamp())
+        except ValueError:
+            continue
+    return None
+
+
+def _build_attacks_search_command(
+    attacker=None,
+    defender=None,
+    result=None,
+    chain=None,
+    from_when=None,
+    to_when=None,
+    faction=None,
+    limit=25,
+    oldest=False,
+):
+    parts = ["sync", "attacks", "--mode", "search"]
+    if attacker:
+        parts.extend(["--attacker-name", str(attacker)])
+    if defender:
+        parts.extend(["--defender-name", str(defender)])
+    if result:
+        parts.extend(["--result", str(result)])
+    if chain is not None:
+        parts.extend(["--chain", str(chain)])
+    from_ts = _parse_when_to_timestamp(from_when)
+    if from_ts is not None:
+        parts.extend(["--from", str(from_ts)])
+    to_ts = _parse_when_to_timestamp(to_when)
+    if to_ts is not None:
+        parts.extend(["--to", str(to_ts)])
+    if faction:
+        parts.extend(["--faction", str(faction)])
     if limit is not None:
         parts.extend(["--limit", str(limit)])
     if oldest:
@@ -1138,7 +1489,15 @@ def _normalize_reaction_entry(entry):
     return "keep", dict(entry)
 
 
-def serve_discord_bot(token: str, prefix: str = "!ti", guild_id: int | None = None, timeout_seconds: int = 180, logger=None):
+def serve_discord_bot(
+    token: str,
+    prefix: str = "!ti",
+    guild_id: int | None = None,
+    timeout_seconds: int = 180,
+    logger=None,
+    settings=None,
+    gateway=None,
+):
     try:
         import discord
         from discord import app_commands
@@ -1150,9 +1509,67 @@ def serve_discord_bot(token: str, prefix: str = "!ti", guild_id: int | None = No
 
     repo_root = Path(__file__).resolve().parent.parent
     bridge = CliBridge(repo_root=repo_root, timeout_seconds=timeout_seconds)
-    settings = Settings()
+    settings = settings or Settings()
     autocomplete = DbAutocomplete(settings.database_path)
     revive_store = ReviveDiscordStore(settings.database_path)
+
+    async def resolve_torn_id_from_display_name(user):
+        if gateway is None:
+            return None, "Automatic lookup is unavailable; provide your Torn ID manually with `/add user_id:<ID>`."
+
+        explicit_id, names = _torn_identity_candidates(user)
+        if explicit_id is not None:
+            return explicit_id, None
+
+        matches = set()
+        api_errors = []
+        factions = [faction for faction in settings.list_factions() if faction.api_keys]
+        for faction in factions:
+            try:
+                response = await asyncio.to_thread(gateway.faction_basic, pool=faction.tag)
+            except Exception as exc:
+                api_errors.append(f"{faction.tag}: {type(exc).__name__}")
+                continue
+            if isinstance(response, dict) and response.get("error"):
+                api_errors.append(f"{faction.tag}: {response['error']}")
+                continue
+            for name in names:
+                matches.update(_torn_member_ids_for_name(response, name))
+
+        if len(matches) == 1:
+            return next(iter(matches)), None
+
+        # Fallback: Torn accounts that have linked this Discord account in Torn's settings.
+        for faction in factions:
+            try:
+                response = await asyncio.to_thread(gateway.user_discord, int(user.id), pool=faction.tag)
+            except Exception:
+                continue
+            discord_info = response.get("discord") if isinstance(response, dict) else None
+            try:
+                linked_id = int((discord_info or {}).get("userID") or 0)
+            except (TypeError, ValueError):
+                linked_id = 0
+            if linked_id > 0:
+                return linked_id, None
+
+        manual = "Provide your Torn ID manually with `/add user_id:<ID>`."
+        if len(matches) > 1:
+            return None, f"Your Discord name matches multiple Torn accounts. {manual}"
+        if api_errors:
+            return None, f"Could not search faction rosters ({'; '.join(api_errors)}). {manual}"
+        return None, (
+            f"No Torn member matched {', '.join(names) or 'your Discord name'}, and your Discord account "
+            f"isn't linked in Torn. {manual}"
+        )
+
+    async def link_discord_user(user, torn_user_id: int | None):
+        if torn_user_id is None:
+            torn_user_id, error = await resolve_torn_id_from_display_name(user)
+            if torn_user_id is None:
+                return False, error
+        revive_store.set_user_torn_id(user.id, int(torn_user_id))
+        return True, f"Linked Discord user {user.display_name} to Torn ID {int(torn_user_id)}."
     api_keys = [str(key).strip() for key in (settings.api_keys or []) if str(key).strip()]
     if not api_keys and getattr(settings, "api_key", None):
         fallback_key = str(settings.api_key or "").strip()
@@ -1167,6 +1584,9 @@ def serve_discord_bot(token: str, prefix: str = "!ti", guild_id: int | None = No
     revive_request_alert_task = None
     oc_delay_alert_task = None
     shoplifting_alert_task = None
+    attacks_sync_task = None
+    bank_request_alert_task = None
+    bank_request_wakeup = asyncio.Event()
 
     def embed_color(ok: bool):
         return 0x2ecc71 if ok else 0xe74c3c
@@ -1191,6 +1611,16 @@ def serve_discord_bot(token: str, prefix: str = "!ti", guild_id: int | None = No
         if settings.discord_revive_channel_id:
             return int(settings.discord_revive_channel_id)
         return int(default_channel_id) if default_channel_id is not None else None
+
+    def resolve_bank_channel_id(faction_tag: str | None = None):
+        if faction_tag:
+            configured = revive_store.get_setting(f"bank_channel_id_{str(faction_tag).upper()}")
+            if configured and str(configured).isdigit():
+                return int(configured)
+        configured = revive_store.get_setting("bank_channel_id")
+        if configured and str(configured).isdigit():
+            return int(configured)
+        return resolve_revive_channel_id()
 
     def resolve_oc_delay_channel_id(default_channel_id: int | None = None, faction_tag: str | None = None):
         if faction_tag:
@@ -1617,6 +2047,7 @@ def serve_discord_bot(token: str, prefix: str = "!ti", guild_id: int | None = No
         faction_cut_amount = float(total_payout) * (float(faction_cut) / 100.0)
         after_cut = float(total_payout) - faction_cut_amount
         assist_cost_total = float(sum(float(r.get("assist_payout") or 0) for r in rows))
+        outside_bonus_total = float(sum(float(r.get("outside_payout") or 0) for r in rows))
         distribution_pool = after_cut - float(xanax_cost) - float(bounty_cost) - assist_cost_total
         total_paid = float(sum(float(r.get("player_share") or 0) for r in rows))
         total_respect = float(sum(float(r.get("total_respect") or 0) for r in rows))
@@ -1625,6 +2056,7 @@ def serve_discord_bot(token: str, prefix: str = "!ti", guild_id: int | None = No
             "faction_cut_amount": faction_cut_amount,
             "after_cut": after_cut,
             "assist_cost_total": assist_cost_total,
+            "outside_bonus_total": outside_bonus_total,
             "distribution_pool": distribution_pool,
             "total_paid": total_paid,
             "total_respect": total_respect,
@@ -1863,7 +2295,7 @@ def serve_discord_bot(token: str, prefix: str = "!ti", guild_id: int | None = No
         img.save(out, format="PNG")
         return out.getvalue(), None
 
-    async def send_war_payout_rich_summary(interaction: discord.Interaction, *, war_id, total_payout, xanax_cost, faction_cut, bounty_cost, per_assist, pay_outside_hits, rows, calculated_at):
+    async def send_war_payout_rich_summary(interaction: discord.Interaction, *, war_id, total_payout, xanax_cost, faction_cut, bounty_cost, per_assist, pay_outside_hits, per_outside_hit, rows, calculated_at):
         metrics = build_war_payout_summary_metrics(total_payout, xanax_cost, faction_cut, bounty_cost, rows)
         pool_ok = metrics["distribution_pool"] >= 0
         calc_text = datetime.fromtimestamp(int(calculated_at)).strftime("%m-%d %H:%M:%S") if calculated_at else "-"
@@ -1908,7 +2340,9 @@ def serve_discord_bot(token: str, prefix: str = "!ti", guild_id: int | None = No
             value=(
                 f"Paid Out: **{_currency(metrics['total_paid'])}**\n"
                 f"Per Assist: **{_currency(per_assist)}**\n"
-                f"Outside Hits: **{'ON' if bool(pay_outside_hits) else 'OFF'}**"
+                f"Outside Hits: **{'ON' if bool(pay_outside_hits) else 'OFF'}**\n"
+                f"Per Outside Hit: **{_currency(per_outside_hit)}**\n"
+                f"Outside Bonuses: **{_currency(metrics['outside_bonus_total'])}**"
             ),
             inline=False,
         )
@@ -2192,6 +2626,380 @@ def serve_discord_bot(token: str, prefix: str = "!ti", guild_id: int | None = No
 
             await asyncio.sleep(poll_seconds)
 
+    def build_bank_request_message(row):
+        requester_name = str(row.get("requester_name") or "Unknown")
+        requester_id = row.get("requester_id")
+        amount = int(row.get("amount") or 0)
+        faction_tag = str(row.get("faction_tag") or settings.default_faction.tag).upper()
+        faction = settings.get_faction(faction_tag)
+
+        requester_text = requester_name
+        if requester_id:
+            requester_text = f"[{requester_name} [{int(requester_id)}]](https://www.torn.com/profiles.php?XID={int(requester_id)})"
+
+        status = str(row.get("status") or "pending").lower()
+        title, color = {
+            "in_process": ("Bank Request - In Process", 0x3498db),
+            "fulfilled": ("Bank Request - Fulfilled", 0x2ecc71),
+            "cancelled": ("Bank Request - Cancelled", 0x95a5a6),
+            "expired": ("Bank Request - Expired", 0x7f8c8d),
+        }.get(status, ("Bank Request", 0xf1c40f))
+
+        embed = discord.Embed(title=title, color=color)
+        embed.add_field(name="Faction", value=faction.name if faction else faction_tag, inline=False)
+        embed.add_field(name="Requester", value=requester_text, inline=False)
+        embed.add_field(name="Amount", value=f"${amount:,}", inline=True)
+        requested_text = str(row.get("requested_text") or "").strip()
+        if requested_text and requested_text != str(amount):
+            embed.add_field(name="Requested", value=requested_text, inline=True)
+        if row.get("balance") is not None:
+            embed.add_field(name="Vault Balance", value=f"${int(row['balance']):,}", inline=True)
+        created_at = int(row.get("created_at") or 0)
+        note = str(row.get("resolution_note") or "").strip()
+        if status == "pending":
+            if created_at:
+                embed.add_field(name="Expires", value=f"<t:{created_at + BANK_REQUEST_TIMEOUT_SECONDS}:R>", inline=False)
+            if note:
+                embed.add_field(name="Note", value=note, inline=False)
+        elif status == "in_process":
+            claimed_at = int(row.get("claimed_at") or 0)
+            claimed_text = f"{row.get('claimed_by') or 'Unknown'}" + (f" <t:{claimed_at}:R>" if claimed_at else "")
+            embed.add_field(name="Claimed By", value=claimed_text, inline=False)
+            embed.add_field(name="Status", value="Checking faction logs for the payment...", inline=False)
+        elif status == "fulfilled":
+            embed.add_field(name="Fulfilled By", value=str(row.get("resolved_by") or "Unknown"), inline=False)
+            if note:
+                embed.add_field(name="Transaction", value=note, inline=False)
+        elif status == "cancelled":
+            embed.add_field(name="Cancelled By", value=str(row.get("resolved_by") or "Unknown"), inline=False)
+            if note:
+                embed.add_field(name="Reason", value=note, inline=False)
+        elif status == "expired":
+            embed.add_field(name="Expired", value="Not fulfilled within 1 hour.", inline=False)
+        embed.set_footer(text=str(row.get("request_id") or ""))
+        if created_at:
+            embed.timestamp = datetime.fromtimestamp(created_at)
+
+        if status not in ("pending", "in_process"):
+            return embed, None
+
+        request_id = str(row.get("request_id") or "")
+        view = discord.ui.View(timeout=None)
+        if status == "pending":
+            view.add_item(discord.ui.Button(
+                style=discord.ButtonStyle.success,
+                label="Fulfill",
+                custom_id=f"{BANK_FULFILL_PREFIX}{request_id}"[:100],
+            ))
+        elif requester_id:
+            view.add_item(discord.ui.Button(
+                style=discord.ButtonStyle.link,
+                label="Open Vault",
+                url=bank_fill_url(requester_id, amount),
+            ))
+        view.add_item(discord.ui.Button(
+            style=discord.ButtonStyle.danger,
+            label="Cancel",
+            custom_id=f"{BANK_CANCEL_PREFIX}{request_id}"[:100],
+        ))
+        return embed, view
+
+    def bank_fill_url(requester_id, amount):
+        return (
+            "https://www.torn.com/factions.php?step=your#/tab=controls&option=give-to-user"
+            f"&addMoneyTo={int(requester_id)}&money={int(amount)}"
+        )
+
+    def resolve_banker_roles(guild, faction_tag):
+        if guild is None:
+            return []
+        tag = str(faction_tag or "").upper()
+        configured = revive_store.get_setting(f"bank_role_id_{tag}") if tag else None
+        if configured and str(configured).isdigit():
+            role = guild.get_role(int(configured))
+            if role is not None:
+                return [role]
+        faction = settings.get_faction(tag) if tag else None
+        for name in ((faction.banker_role_name if faction else ""), settings.discord_banker_role):
+            if not name:
+                continue
+            role = discord.utils.find(lambda r, n=name: r.name.casefold() == n.casefold(), guild.roles)
+            if role is not None:
+                return [role]
+        return []
+
+    def is_bank_staff(member, row):
+        perms = getattr(member, "guild_permissions", None)
+        if perms is not None and (perms.administrator or perms.manage_guild):
+            return True
+        banker_ids = {role.id for role in resolve_banker_roles(getattr(member, "guild", None), row.get("faction_tag"))}
+        return any(role.id in banker_ids for role in getattr(member, "roles", []))
+
+    def is_bank_requester(member, row):
+        linked_id = revive_store.get_user_torn_id(member.id)
+        return linked_id is not None and row.get("requester_id") is not None and int(linked_id) == int(row["requester_id"])
+
+    async def dm_bank_requester(row, title: str, text: str, color: int):
+        """Privately notify the requester; silently skipped if they have no linked Discord or DMs closed."""
+        requester_id = row.get("requester_id")
+        discord_id = revive_store.get_discord_user_for_torn_id(int(requester_id)) if requester_id else None
+        if not discord_id:
+            return
+        try:
+            user = bot.get_user(int(discord_id)) or await bot.fetch_user(int(discord_id))
+            embed = discord.Embed(title=title, description=text, color=color)
+            embed.set_footer(text=str(row.get("request_id") or ""))
+            await user.send(embed=embed)
+        except Exception as exc:
+            if logger:
+                logger.warning(f"Could not DM bank requester {discord_id}: {type(exc).__name__}: {exc}")
+
+    async def get_channel_by_id(channel_id: int):
+        channel = bot.get_channel(int(channel_id))
+        if channel is not None:
+            return channel
+        try:
+            return await bot.fetch_channel(int(channel_id))
+        except Exception as exc:
+            if logger:
+                logger.warning(f"Could not fetch channel {channel_id}: {type(exc).__name__}: {exc}")
+            return None
+
+    async def refresh_bank_request_message(request_id: str):
+        row = revive_store.get_bank_request(request_id)
+        if not row or not row.get("channel_id") or not row.get("message_id"):
+            return
+        channel = await get_channel_by_id(int(row["channel_id"]))
+        if channel is None:
+            return
+        embed, view = build_bank_request_message(row)
+        try:
+            await channel.get_partial_message(int(row["message_id"])).edit(embed=embed, view=view)
+        except Exception as exc:
+            if logger:
+                logger.warning(f"Could not update bank request message {request_id}: {type(exc).__name__}: {exc}")
+
+    async def expire_stale_bank_requests():
+        cutoff = int(time.time()) - BANK_REQUEST_TIMEOUT_SECONDS
+        for row in revive_store.list_stale_bank_requests(cutoff):
+            if revive_store.resolve_bank_request(row["request_id"], "expired", "timeout", note="Not fulfilled within 1 hour."):
+                await refresh_bank_request_message(row["request_id"])
+                await dm_bank_requester(
+                    row,
+                    "Withdrawal Request Expired",
+                    f"Your withdrawal request for ${int(row['amount']):,} expired: it wasn't fulfilled within 1 hour. "
+                    "Submit a new request if you still need the money.",
+                    0x7f8c8d,
+                )
+                if logger:
+                    logger.info(f"Bank request {row['request_id']} expired")
+
+    async def verify_in_process_bank_requests():
+        """Match claimed requests against faction funds news; release them if no payment shows up in time."""
+        rows = revive_store.list_bank_requests_by_status("in_process")
+        if not rows or gateway is None:
+            return
+        news_by_faction = {}
+        for faction_tag in {str(row.get("faction_tag") or "").upper() for row in rows}:
+            try:
+                news_by_faction[faction_tag] = await asyncio.to_thread(gateway.faction_funds_news, pool=faction_tag)
+            except Exception as exc:
+                if logger:
+                    logger.warning(f"Could not read funds news [{faction_tag}]: {type(exc).__name__}: {exc}")
+
+        now = int(time.time())
+        for row in rows:
+            request_id = row["request_id"]
+            response = news_by_faction.get(str(row.get("faction_tag") or "").upper())
+            payment = find_vault_payment(
+                response,
+                int(row.get("requester_id") or 0),
+                since=int(row.get("created_at") or 0),
+                expected_amount=int(row.get("amount") or 0),
+            ) if response else None
+
+            if payment:
+                banker = payment.get("giver_name") or row.get("claimed_by") or "Unknown"
+                note = f"${payment['amount']:,} sent <t:{payment['timestamp']}:R>"
+                if revive_store.resolve_bank_request(request_id, "fulfilled", banker, note=note):
+                    await refresh_bank_request_message(request_id)
+                    await dm_bank_requester(
+                        row,
+                        "Withdrawal Fulfilled",
+                        f"{banker} sent you ${payment['amount']:,} from the faction vault.",
+                        0x2ecc71,
+                    )
+                    if logger:
+                        logger.info(f"Bank request {request_id} fulfilled by {banker} (${payment['amount']:,})")
+                continue
+
+            if now - int(row.get("claimed_at") or now) >= BANK_VERIFY_WINDOW_SECONDS:
+                note = (
+                    f"{row.get('claimed_by') or 'A banker'} clicked Fulfill, but no matching transaction "
+                    f"appeared in the faction logs within {BANK_VERIFY_WINDOW_SECONDS // 60} minutes."
+                )
+                if revive_store.release_bank_request(request_id, note):
+                    await refresh_bank_request_message(request_id)
+                    if logger:
+                        logger.info(f"Bank request {request_id} released: no transaction found")
+
+    async def cancel_bank_request(interaction, request_id: str, reason: str):
+        row = revive_store.get_bank_request(request_id)
+        if row is None:
+            await interaction.response.send_message("This bank request no longer exists.", ephemeral=True)
+            return
+        by_requester = is_bank_requester(interaction.user, row)
+        if not (by_requester or is_bank_staff(interaction.user, row)):
+            await interaction.response.send_message("Only the requester or a banker can cancel this request.", ephemeral=True)
+            return
+        actor = interaction.user.display_name
+        if revive_store.resolve_bank_request(request_id, "cancelled", actor, note=reason or None):
+            who = "you" if by_requester else f"{actor} (banker)"
+            text = f"Your withdrawal request for ${int(row['amount']):,} was cancelled by {who}."
+            if reason:
+                text += f"\nReason: {reason}"
+            await dm_bank_requester(row, "Withdrawal Request Cancelled", text, 0x95a5a6)
+            if logger:
+                logger.info(f"Bank request {request_id} cancelled by {actor}" + (f": {reason}" if reason else ""))
+        embed, view = build_bank_request_message(revive_store.get_bank_request(request_id))
+        await interaction.response.edit_message(embed=embed, view=view)
+
+    class BankCancelModal(discord.ui.Modal, title="Cancel Bank Request"):
+        reason = discord.ui.TextInput(
+            label="Reason (optional)",
+            style=discord.TextStyle.paragraph,
+            required=False,
+            max_length=300,
+        )
+
+        def __init__(self, request_id: str):
+            super().__init__(timeout=300)
+            self.request_id = request_id
+
+        async def on_submit(self, interaction):
+            await cancel_bank_request(interaction, self.request_id, str(self.reason.value or "").strip())
+
+    async def claim_bank_request(interaction, request_id: str):
+        row = revive_store.get_bank_request(request_id)
+        if row is None:
+            await interaction.response.send_message("This bank request no longer exists.", ephemeral=True)
+            return
+        if not is_bank_staff(interaction.user, row):
+            await interaction.response.send_message("Only a banker can fulfill this request.", ephemeral=True)
+            return
+        actor = interaction.user.display_name
+        claimed = revive_store.claim_bank_request(request_id, actor)
+        row = revive_store.get_bank_request(request_id)
+        embed, view = build_bank_request_message(row)
+        await interaction.response.edit_message(embed=embed, view=view)
+        if not claimed:
+            await interaction.followup.send(f"This request is already {row.get('status')}.", ephemeral=True)
+            return
+        if row.get("requester_id"):
+            link_view = discord.ui.View(timeout=None)
+            link_view.add_item(discord.ui.Button(
+                style=discord.ButtonStyle.link,
+                label="Open Vault",
+                url=bank_fill_url(row["requester_id"], row["amount"]),
+            ))
+            await interaction.followup.send(
+                f"Send ${int(row['amount']):,} to {row.get('requester_name')}. "
+                "The request will be marked fulfilled once the payment shows in the faction logs.",
+                view=link_view,
+                ephemeral=True,
+            )
+        await dm_bank_requester(
+            row,
+            "Withdrawal In Process",
+            f"{actor} is processing your withdrawal of ${int(row['amount']):,}.",
+            0x3498db,
+        )
+        bank_request_wakeup.set()
+        if logger:
+            logger.info(f"Bank request {request_id} claimed by {actor}")
+
+    @bot.listen("on_interaction")
+    async def bank_request_button_listener(interaction: discord.Interaction):
+        if interaction.type != discord.InteractionType.component:
+            return
+        custom_id = str((interaction.data or {}).get("custom_id") or "")
+        if custom_id.startswith(BANK_FULFILL_PREFIX):
+            await claim_bank_request(interaction, custom_id[len(BANK_FULFILL_PREFIX):])
+        elif custom_id.startswith(BANK_CANCEL_PREFIX):
+            request_id = custom_id[len(BANK_CANCEL_PREFIX):]
+            row = revive_store.get_bank_request(request_id)
+            if row is None:
+                await interaction.response.send_message("This bank request no longer exists.", ephemeral=True)
+            elif not (is_bank_requester(interaction.user, row) or is_bank_staff(interaction.user, row)):
+                await interaction.response.send_message("Only the requester or a banker can cancel this request.", ephemeral=True)
+            else:
+                await interaction.response.send_modal(BankCancelModal(request_id))
+
+    async def bank_request_alert_watcher():
+        poll_seconds = 2
+        next_expiry_check = 0.0
+        next_verify_check = 0.0
+        warned_missing_channel = set()
+
+        while not bot.is_closed():
+            bank_request_wakeup.clear()
+            try:
+                if time.time() >= next_expiry_check:
+                    next_expiry_check = time.time() + 30
+                    await expire_stale_bank_requests()
+
+                if time.time() >= next_verify_check:
+                    next_verify_check = time.time() + 15
+                    await verify_in_process_bank_requests()
+
+                rows = revive_store.list_unposted_bank_requests(limit=50)
+                for row in rows:
+                    faction_tag = str(row.get("faction_tag") or settings.default_faction.tag).upper()
+                    channel_id = resolve_bank_channel_id(faction_tag)
+                    if channel_id is None:
+                        if logger and faction_tag not in warned_missing_channel:
+                            logger.warning(f"Bank request watcher skipped [{faction_tag}]: no bank or revive channel configured")
+                        warned_missing_channel.add(faction_tag)
+                        continue
+
+                    channel = await get_channel_by_id(int(channel_id))
+                    if channel is None:
+                        continue
+
+                    try:
+                        embed, view = build_bank_request_message(row)
+                        roles = resolve_banker_roles(getattr(channel, "guild", None), faction_tag)
+                        kwargs = {
+                            "embed": embed,
+                            "allowed_mentions": discord.AllowedMentions(roles=roles) if roles else discord.AllowedMentions.none(),
+                        }
+                        if roles:
+                            kwargs["content"] = " ".join(role.mention for role in roles)
+                        if view is not None:
+                            kwargs["view"] = view
+                        message = await channel.send(**kwargs)
+                        revive_store.mark_bank_request_posted(row["request_id"], int(channel.id), int(message.id))
+                        if logger:
+                            logger.info(f"Posted bank request {row['request_id']} to channel {channel.id}")
+                        await dm_bank_requester(
+                            row,
+                            "Withdrawal Request Submitted",
+                            f"Your request for ${int(row['amount']):,} was sent to the bankers. "
+                            f"It expires <t:{int(row['created_at']) + BANK_REQUEST_TIMEOUT_SECONDS}:R> if not fulfilled.",
+                            0xf1c40f,
+                        )
+                    except Exception as exc:
+                        if logger:
+                            logger.warning(f"Failed to post bank request {row.get('request_id')}: {type(exc).__name__}: {exc}")
+            except Exception as exc:
+                if logger:
+                    logger.warning(f"Bank request watcher error: {type(exc).__name__}: {exc}")
+
+            try:
+                await asyncio.wait_for(bank_request_wakeup.wait(), timeout=poll_seconds)
+            except asyncio.TimeoutError:
+                pass
+
     async def oc_delay_alert_watcher():
         poll_seconds = max(20, int(getattr(settings, "discord_oc_delay_poll_seconds", 60) or 60))
         last_sync_at = 0.0
@@ -2254,6 +3062,30 @@ def serve_discord_bot(token: str, prefix: str = "!ti", guild_id: int | None = No
             except Exception as exc:
                 if logger:
                     logger.warning(f"OC delay watcher error: {type(exc).__name__}: {exc}")
+
+            await asyncio.sleep(poll_seconds)
+
+    async def attacks_sync_watcher():
+        """Keep attacks synced live for every configured faction without a separate `watch attacks` process."""
+        poll_seconds = max(5, int(getattr(settings, "discord_attacks_poll_seconds", 15) or 15))
+
+        while not bot.is_closed():
+            try:
+                for faction_cfg in (settings.list_factions() or [settings.default_faction]):
+                    tag = faction_cfg.tag if faction_cfg else "GTS"
+                    sync_result = await asyncio.to_thread(
+                        bridge.run_foreground,
+                        f"sync attacks --mode live --faction {tag}",
+                        max(60, int(timeout_seconds or 180)),
+                    )
+                    if not sync_result.get("ok") and logger:
+                        logger.warning(
+                            f"Discord attacks auto-sync failed for [{tag}] (exit {sync_result.get('returncode')}): "
+                            f"{str(sync_result.get('output') or '').splitlines()[-1] if sync_result.get('output') else 'no output'}"
+                        )
+            except Exception as exc:
+                if logger:
+                    logger.warning(f"Attacks auto-sync watcher error: {type(exc).__name__}: {exc}")
 
             await asyncio.sleep(poll_seconds)
 
@@ -2368,7 +3200,7 @@ def serve_discord_bot(token: str, prefix: str = "!ti", guild_id: int | None = No
 
     @bot.event
     async def on_ready():
-        nonlocal revive_watcher_task, revive_request_alert_task, oc_delay_alert_task, shoplifting_alert_task
+        nonlocal revive_watcher_task, revive_request_alert_task, oc_delay_alert_task, shoplifting_alert_task, attacks_sync_task, bank_request_alert_task
         if logger:
             logger.success(f"Discord bot logged in as {bot.user}")
             try:
@@ -2421,6 +3253,11 @@ def serve_discord_bot(token: str, prefix: str = "!ti", guild_id: int | None = No
             if logger:
                 logger.info("Started revive request alert watcher task")
 
+        if bank_request_alert_task is None or bank_request_alert_task.done():
+            bank_request_alert_task = asyncio.create_task(bank_request_alert_watcher())
+            if logger:
+                logger.info("Started bank request alert watcher task")
+
         if oc_delay_alert_task is None or oc_delay_alert_task.done():
             oc_delay_alert_task = asyncio.create_task(oc_delay_alert_watcher())
             if logger:
@@ -2430,6 +3267,11 @@ def serve_discord_bot(token: str, prefix: str = "!ti", guild_id: int | None = No
             shoplifting_alert_task = asyncio.create_task(shoplifting_alert_watcher())
             if logger:
                 logger.info("Started shoplifting alert watcher task")
+
+        if getattr(settings, "discord_attacks_autosync", True) and (attacks_sync_task is None or attacks_sync_task.done()):
+            attacks_sync_task = asyncio.create_task(attacks_sync_watcher())
+            if logger:
+                logger.info("Started attacks auto-sync task (all configured factions)")
 
     async def apply_reaction_role(payload, grant: bool):
         if payload.guild_id is None:
@@ -2519,13 +3361,13 @@ def serve_discord_bot(token: str, prefix: str = "!ti", guild_id: int | None = No
             await send_embed_chunks(ctx.send, title="TornIntel Job Output", text=text, ok=ok)
 
         @bot.command(name="add")
-        async def add_torn_user(ctx, torn_user_id: int):
-            revive_store.set_user_torn_id(ctx.author.id, torn_user_id)
+        async def add_torn_user(ctx, torn_user_id: int | None = None):
+            ok, text = await link_discord_user(ctx.author, torn_user_id)
             await send_embed_chunks(
                 ctx.send,
-                title="Torn ID Linked",
-                text=f"Linked Discord user {ctx.author.display_name} to Torn ID {int(torn_user_id)}.",
-                ok=True,
+                title="Torn ID Linked" if ok else "Torn ID Lookup Failed",
+                text=text,
+                ok=ok,
             )
 
         @bot.command(name="revive")
@@ -2602,15 +3444,15 @@ def serve_discord_bot(token: str, prefix: str = "!ti", guild_id: int | None = No
         )
 
     @bot.tree.command(name="add", description="Link your Discord user to your Torn player ID")
-    @app_commands.describe(user_id="Your Torn player ID")
-    async def add_slash(interaction: discord.Interaction, user_id: int):
-        await interaction.response.defer(thinking=False)
-        revive_store.set_user_torn_id(interaction.user.id, int(user_id))
+    @app_commands.describe(user_id="Your Torn player ID (optional; otherwise looked up from your Discord name or Torn Discord link)")
+    async def add_slash(interaction: discord.Interaction, user_id: int | None = None):
+        await interaction.response.defer(thinking=user_id is None)
+        ok, text = await link_discord_user(interaction.user, user_id)
         await send_embed_chunks(
             interaction.followup.send,
-            title="Torn ID Linked",
-            text=f"Linked Discord user {interaction.user.display_name} to Torn ID {int(user_id)}.",
-            ok=True,
+            title="Torn ID Linked" if ok else "Torn ID Lookup Failed",
+            text=text,
+            ok=ok,
         )
 
     @bot.tree.command(name="revive", description="Request a revive for a target Torn ID")
@@ -2707,6 +3549,185 @@ def serve_discord_bot(token: str, prefix: str = "!ti", guild_id: int | None = No
             interaction.followup.send,
             title="Active Revive Requests",
             text="\n".join(lines),
+            ok=True,
+        )
+
+    @bot.tree.command(name="ti_withdraw", description="Request a faction vault withdrawal")
+    @app_commands.describe(amount="Amount from your vault balance, e.g. 5000000, 1.5m, 250k or all")
+    async def ti_withdraw_slash(interaction: discord.Interaction, amount: str):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        private_send = functools.partial(interaction.followup.send, ephemeral=True)
+        if interaction.guild is None:
+            await send_embed_chunks(
+                private_send,
+                title="Withdrawal Request Failed",
+                text="Run this command in your faction's Discord server.",
+                ok=False,
+            )
+            return
+
+        torn_user_id = revive_store.get_user_torn_id(interaction.user.id)
+        if torn_user_id is None:
+            await send_embed_chunks(
+                private_send,
+                title="Withdrawal Request Failed",
+                text="Link your Torn account first with `/add user_id:<your Torn ID>`.",
+                ok=False,
+            )
+            return
+
+        role_factions = _factions_for_member_roles(settings, getattr(interaction.user, "roles", []))
+        try:
+            resolved = await asyncio.to_thread(
+                resolve_withdrawal,
+                gateway,
+                settings,
+                torn_user_id,
+                amount,
+                role_factions[0].tag if len(role_factions) == 1 else None,
+            )
+            request_row = revive_store.create_bank_request(
+                requester_id=torn_user_id,
+                requester_name=interaction.user.display_name,
+                amount=resolved["amount"],
+                faction_tag=resolved["faction"].tag,
+                requested_text=resolved["requested_text"],
+                balance=resolved["balance"],
+            )
+        except (TypeError, ValueError) as exc:
+            await send_embed_chunks(
+                private_send,
+                title="Withdrawal Request Failed",
+                text=str(exc) if isinstance(exc, BankBalanceError) else "Enter a valid amount, e.g. 5000000, 1.5m, 250k or all.",
+                ok=False,
+            )
+            return
+
+        bank_request_wakeup.set()
+        faction = resolved["faction"]
+        text = f"Your request for ${int(request_row['amount']):,} was sent to the {faction.name} bankers."
+        if resolved["capped"]:
+            text += " The amount was capped to your vault balance."
+        text += " You'll get DM updates as it's processed."
+        await send_embed_chunks(
+            private_send,
+            title="Withdrawal Request Submitted",
+            text=text,
+            ok=True,
+            footer=request_row["request_id"],
+        )
+
+    @bot.tree.command(name="ti_bank_role", description="View or set the banker role pinged for a faction's bank requests")
+    @app_commands.describe(
+        faction="Faction tag, e.g. GTS or GTH",
+        role_ref="Role ID or mention to ping for this faction's bank requests (omit to view)",
+    )
+    @app_commands.default_permissions(manage_roles=True)
+    async def ti_bank_role_slash(interaction: discord.Interaction, faction: str, role_ref: str | None = None):
+        await interaction.response.defer(thinking=False)
+        faction_config = settings.get_faction(str(faction).strip().upper())
+        if interaction.guild is None or faction_config is None:
+            await send_embed_chunks(
+                interaction.followup.send,
+                title="Bank Role Update Failed",
+                text="Run this in a server with a valid faction tag." if faction_config else f"Unknown faction tag: {faction}.",
+                ok=False,
+            )
+            return
+
+        label = f"{faction_config.name} [{faction_config.tag}]"
+        if role_ref is None:
+            current = resolve_banker_roles(interaction.guild, faction_config.tag)
+            text = f"Bank requests for {label} ping @{current[0].name}." if current else f"No banker role resolved for {label}."
+            await send_embed_chunks(interaction.followup.send, title="Bank Role", text=text, ok=True)
+            return
+
+        perms = getattr(interaction, "permissions", None)
+        if perms is None or not (perms.administrator or perms.manage_guild or perms.manage_roles):
+            await send_embed_chunks(
+                interaction.followup.send,
+                title="Bank Role Update Failed",
+                text="You need Manage Roles (or Administrator/Manage Server) permission.",
+                ok=False,
+            )
+            return
+
+        role_id = _parse_role_id(role_ref)
+        role = interaction.guild.get_role(role_id) if role_id else None
+        if role is None:
+            await send_embed_chunks(
+                interaction.followup.send,
+                title="Bank Role Update Failed",
+                text="Invalid role ID/mention, or the role is not in this server.",
+                ok=False,
+            )
+            return
+
+        revive_store.set_setting(f"bank_role_id_{faction_config.tag}", str(int(role.id)))
+        await send_embed_chunks(
+            interaction.followup.send,
+            title="Bank Role Updated",
+            text=f"Bank requests for {label} will now ping @{role.name}.",
+            ok=True,
+        )
+
+    @bot.tree.command(name="ti_bank_channel", description="View or set the channel used for bank request posts")
+    @app_commands.describe(
+        channel_ref="Optional channel ID or mention, e.g. 123... or <#123...>",
+        faction="Optional faction tag for a faction-specific channel",
+    )
+    @app_commands.default_permissions(manage_channels=True)
+    async def ti_bank_channel_slash(interaction: discord.Interaction, channel_ref: str | None = None, faction: str | None = None):
+        await interaction.response.defer(thinking=False)
+        faction_tag = str(faction).strip().upper() if faction else None
+        faction_config = settings.get_faction(faction_tag) if faction_tag else None
+        if faction_tag and faction_config is None:
+            await send_embed_chunks(
+                interaction.followup.send,
+                title="Bank Channel Update Failed",
+                text=f"Unknown faction tag: {faction_tag}.",
+                ok=False,
+            )
+            return
+        setting_key = f"bank_channel_id_{faction_tag}" if faction_tag else "bank_channel_id"
+        label = f" for {faction_config.name} [{faction_tag}]" if faction_config else ""
+        if channel_ref is None:
+            current = resolve_bank_channel_id(faction_tag)
+            text = f"Current bank channel{label}: <#{current}>" if current else f"No bank channel set{label} (and no revive channel fallback)."
+            await send_embed_chunks(interaction.followup.send, title="Bank Channel", text=text, ok=True)
+            return
+
+        perms = getattr(interaction, "permissions", None)
+        if interaction.guild is None or perms is None or not (perms.administrator or perms.manage_guild or perms.manage_channels):
+            await send_embed_chunks(
+                interaction.followup.send,
+                title="Bank Channel Update Failed",
+                text="Run this in a server channel with Manage Channels (or Administrator/Manage Server) permission.",
+                ok=False,
+            )
+            return
+
+        parsed_channel_id = _parse_channel_id(channel_ref)
+        target_channel = None
+        if parsed_channel_id is not None:
+            try:
+                target_channel = bot.get_channel(int(parsed_channel_id)) or await bot.fetch_channel(int(parsed_channel_id))
+            except Exception:
+                target_channel = None
+        if target_channel is None:
+            await send_embed_chunks(
+                interaction.followup.send,
+                title="Bank Channel Update Failed",
+                text="Invalid channel ID/mention or channel is not accessible by the bot.",
+                ok=False,
+            )
+            return
+
+        revive_store.set_setting(setting_key, str(int(parsed_channel_id)))
+        await send_embed_chunks(
+            interaction.followup.send,
+            title="Bank Channel Updated",
+            text=f"Bank requests{label} will now post in <#{int(parsed_channel_id)}>.",
             ok=True,
         )
 
@@ -3256,6 +4277,7 @@ def serve_discord_bot(token: str, prefix: str = "!ti", guild_id: int | None = No
         bounty_cost="Optional bounty deduction",
         per_assist="Optional assist bonus",
         pay_outside_hits="Set true to pay hits outside war",
+        per_outside_hit="Flat payment per eligible outside hit",
         hit_number="Hit number for chain_hit",
         player="Player filter when needed",
         item="Item filter when needed (revives requests_list uses target-name)",
@@ -3294,6 +4316,7 @@ def serve_discord_bot(token: str, prefix: str = "!ti", guild_id: int | None = No
         bounty_cost: float = 0.0,
         per_assist: float = 0.0,
         pay_outside_hits: bool = False,
+        per_outside_hit: float = 0.0,
         hit_number: int | None = None,
         player: str | None = None,
         item: str | None = None,
@@ -3348,11 +4371,11 @@ def serve_discord_bot(token: str, prefix: str = "!ti", guild_id: int | None = No
                 )
                 return
 
-            if xanax_cost < 0 or bounty_cost < 0 or per_assist < 0:
+            if xanax_cost < 0 or bounty_cost < 0 or per_assist < 0 or per_outside_hit < 0:
                 await send_embed_chunks(
                     interaction.followup.send,
                     title="TornIntel Command Error",
-                    text="xanax_cost, bounty_cost, and per_assist must be non-negative.",
+                    text="xanax_cost, bounty_cost, per_assist, and per_outside_hit must be non-negative.",
                     ok=False,
                 )
                 return
@@ -3386,6 +4409,7 @@ def serve_discord_bot(token: str, prefix: str = "!ti", guild_id: int | None = No
             bounty_cost=bounty_cost,
             per_assist=per_assist,
             pay_outside_hits=1 if pay_outside_hits else 0,
+            per_outside_hit=per_outside_hit,
             hit_number=hit_number,
             player=player,
             item=item,
@@ -3433,6 +4457,7 @@ def serve_discord_bot(token: str, prefix: str = "!ti", guild_id: int | None = No
                     bounty_cost=bounty_cost,
                     per_assist=per_assist,
                     pay_outside_hits=pay_outside_hits,
+                    per_outside_hit=per_outside_hit,
                     rows=rows,
                     calculated_at=calculated_at,
                 )
@@ -3492,6 +4517,7 @@ def serve_discord_bot(token: str, prefix: str = "!ti", guild_id: int | None = No
         bounty_cost="Bounty deduction",
         per_assist="Pay per assist",
         pay_outside_hits="Pay hits outside war",
+        per_outside_hit="Flat payment per eligible outside hit",
         view_summary="Show summary embed",
         view_top="Show top players embed",
         view_full="Show full payout table (all players)",
@@ -3510,6 +4536,7 @@ def serve_discord_bot(token: str, prefix: str = "!ti", guild_id: int | None = No
         bounty_cost: float = 0.0,
         per_assist: float = 0.0,
         pay_outside_hits: bool = False,
+        per_outside_hit: float = 0.0,
         view_summary: bool = True,
         view_top: bool = True,
         view_full: bool = False,
@@ -3538,11 +4565,11 @@ def serve_discord_bot(token: str, prefix: str = "!ti", guild_id: int | None = No
             )
             return
 
-        if xanax_cost < 0 or bounty_cost < 0 or per_assist < 0:
+        if xanax_cost < 0 or bounty_cost < 0 or per_assist < 0 or per_outside_hit < 0:
             await send_embed_chunks(
                 interaction.followup.send,
                 title="TornIntel Command Error",
-                text="xanax_cost, bounty_cost, and per_assist must be non-negative.",
+                text="xanax_cost, bounty_cost, per_assist, and per_outside_hit must be non-negative.",
                 ok=False,
             )
             return
@@ -3573,6 +4600,7 @@ def serve_discord_bot(token: str, prefix: str = "!ti", guild_id: int | None = No
             bounty_cost=bounty_cost,
             per_assist=per_assist,
             pay_outside_hits=1 if pay_outside_hits else 0,
+            per_outside_hit=per_outside_hit,
         )
 
         if background:
@@ -3611,6 +4639,7 @@ def serve_discord_bot(token: str, prefix: str = "!ti", guild_id: int | None = No
                 bounty_cost=bounty_cost,
                 per_assist=per_assist,
                 pay_outside_hits=pay_outside_hits,
+                per_outside_hit=per_outside_hit,
                 rows=rows,
                 calculated_at=calculated_at,
             )
@@ -3657,6 +4686,50 @@ def serve_discord_bot(token: str, prefix: str = "!ti", guild_id: int | None = No
                     text=image_error or "Could not build image export.",
                     ok=False,
                 )
+
+    @bot.tree.command(name="ti_attacks", description="Guided attack search from local DB (not just chain hits)")
+    @app_commands.describe(
+        attacker="Attacker name contains",
+        defender="Defender name contains",
+        result="Result filter (Attacked, Mugged, Hospitalized, Lost, ...)",
+        chain="Chain hit number",
+        from_when="Start of time range (YYYY-MM-DD[ HH:MM] or unix timestamp)",
+        to_when="End of time range (YYYY-MM-DD[ HH:MM] or unix timestamp)",
+        faction="Faction tag whose synced attacks to search (e.g. GTS, GTH)",
+        limit="Max rows",
+        oldest="Oldest first",
+        background="Run in background mode",
+    )
+    async def ti_attacks_slash(
+        interaction: discord.Interaction,
+        attacker: str | None = None,
+        defender: str | None = None,
+        result: str | None = None,
+        chain: int | None = None,
+        from_when: str | None = None,
+        to_when: str | None = None,
+        faction: str | None = None,
+        limit: int = 25,
+        oldest: bool = False,
+        background: bool = False,
+    ):
+        await interaction.response.defer(thinking=True)
+        command_text = _build_attacks_search_command(
+            attacker=attacker,
+            defender=defender,
+            result=result,
+            chain=chain,
+            from_when=from_when,
+            to_when=to_when,
+            faction=faction,
+            limit=limit,
+            oldest=oldest,
+        )
+
+        async def send_followup(**kwargs):
+            await interaction.followup.send(**kwargs)
+
+        await run_and_respond(send_followup, command_text=command_text, background=background, timeout_override=timeout_seconds)
 
     @bot.tree.command(name="ti_revives", description="Guided revives search from local DB")
     @app_commands.describe(

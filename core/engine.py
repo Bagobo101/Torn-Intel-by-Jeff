@@ -130,6 +130,9 @@ class TornIntel:
                 defender_name=kwargs.get("defender_name"),
                 result=kwargs.get("result"),
                 chain=kwargs.get("chain"),
+                from_timestamp=kwargs.get("from_timestamp"),
+                to_timestamp=kwargs.get("to_timestamp"),
+                faction=kwargs.get("faction"),
                 limit=kwargs.get("limit", 25),
                 order="ASC" if kwargs.get("oldest_first") else "DESC",
             )
@@ -155,6 +158,12 @@ class TornIntel:
             active.append(f"result={filters['result']}")
         if filters.get("chain") is not None:
             active.append(f"chain=#{filters['chain']}")
+        if filters.get("from_timestamp"):
+            active.append(f"from={datetime.fromtimestamp(int(filters['from_timestamp'])).strftime('%Y-%m-%d %H:%M')}")
+        if filters.get("to_timestamp"):
+            active.append(f"to={datetime.fromtimestamp(int(filters['to_timestamp'])).strftime('%Y-%m-%d %H:%M')}")
+        if filters.get("faction"):
+            active.append(f"faction={filters['faction']}")
         filter_str = "  |  ".join(active) if active else "none"
 
         print(f"\n{'='*W}")
@@ -482,6 +491,7 @@ class TornIntel:
             bounty_cost = kwargs.get("bounty_cost", 0)
             per_assist = kwargs.get("per_assist", 0)
             pay_outside_hits = kwargs.get("pay_outside_hits", 0)
+            per_outside_hit = kwargs.get("per_outside_hit", 0)
             
             if war_id is None or total_payout is None:
                 raise ValueError(
@@ -491,7 +501,8 @@ class TornIntel:
             from modules.rankedwars.payout import WarPayoutCalculator
             calculator = WarPayoutCalculator(self.services.database, self.services.logger, self.services.settings)
             result = calculator.calculate_payouts(
-                war_id, total_payout, xanax_cost, faction_cut, bounty_cost, per_assist, pay_outside_hits
+                war_id, total_payout, xanax_cost, faction_cut, bounty_cost, per_assist,
+                pay_outside_hits, per_outside_hit
             )
             
             if result:
@@ -710,6 +721,8 @@ class TornIntel:
             guild_id=effective_guild_id,
             timeout_seconds=effective_timeout,
             logger=self.services.logger,
+            settings=self.services.settings,
+            gateway=self.services.gateway,
         )
 
     #######################################################
@@ -784,11 +797,13 @@ class TornIntel:
 
         cooldown = kwargs.get("cooldown", 5)
         duration = kwargs.get("duration", None)
+        faction = kwargs.get("faction", None)
 
         self.services.scheduler.run_continuous(
             module_name,
             catch_up_cooldown=cooldown,
             duration_seconds=duration,
+            faction=faction,
         )
 
     #######################################################
@@ -806,6 +821,7 @@ class TornIntel:
         bounty_cost = kwargs.get("bounty_cost", 0)
         per_assist = kwargs.get("per_assist", 0)
         pay_outside_hits = kwargs.get("pay_outside_hits", 0)
+        per_outside_hit = kwargs.get("per_outside_hit", 0)
         
         if war_id is None or total_payout is None:
             raise ValueError(
@@ -815,7 +831,8 @@ class TornIntel:
         from modules.rankedwars.payout import WarPayoutCalculator
         calculator = WarPayoutCalculator(self.services.database, self.services.logger, self.services.settings)
         result = calculator.calculate_payouts(
-            war_id, total_payout, xanax_cost, faction_cut, bounty_cost, per_assist, pay_outside_hits
+            war_id, total_payout, xanax_cost, faction_cut, bounty_cost, per_assist,
+            pay_outside_hits, per_outside_hit
         )
         
         if result:
@@ -837,6 +854,7 @@ class TornIntel:
         bounty_cost = kwargs.get("bounty_cost", 0)
         per_assist = kwargs.get("per_assist", 0)
         pay_outside_hits = kwargs.get("pay_outside_hits", 0)
+        per_outside_hit = kwargs.get("per_outside_hit", 0)
         
         if war_id is None or csv_path is None or total_payout is None:
             raise ValueError(
@@ -846,7 +864,8 @@ class TornIntel:
         from modules.rankedwars.payout_from_csv import CSVWarPayoutCalculator
         calculator = CSVWarPayoutCalculator(self.services.database, self.services.logger, self.services.settings)
         result = calculator.calculate_payouts_from_csv(
-            war_id, csv_path, total_payout, xanax_cost, faction_cut, bounty_cost, per_assist, pay_outside_hits
+            war_id, csv_path, total_payout, xanax_cost, faction_cut, bounty_cost,
+            per_assist, pay_outside_hits, per_outside_hit
         )
         
         if result:
@@ -1111,6 +1130,9 @@ class TornIntel:
         if data.get('per_assist', 0) > 0:
             print(f"  Assist Payment         : {money(data['per_assist'])}/assist")
             print(f"  Total Assist Cost      : {money(data['total_assist_cost'])}")
+        if data.get('pay_outside_hits'):
+            print(f"  Outside Hit Payment    : {money(data.get('per_outside_hit', 0))}/hit")
+            print(f"  Total Outside Bonuses  : {money(data.get('total_outside_cost', 0))} (added separately)")
         print(f"  Distribution Pool      : {money(data['payout_after_costs'])}")
         print(f"  Total War Respect      : {Colors.CYAN}{data['total_war_respect']:,.2f}{Colors.RESET}")
         if data.get('dollar_per_respect'):

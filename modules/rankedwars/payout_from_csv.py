@@ -9,6 +9,7 @@ import csv
 import time
 from core.schema import SchemaBuilder
 from models.payout import Payout
+from modules.rankedwars.payout import round_currency
 
 
 class CSVWarPayoutCalculator:
@@ -94,7 +95,8 @@ class CSVWarPayoutCalculator:
         }
     
     def calculate_payouts_from_csv(self, war_id, csv_path, total_payout, xanax_cost, 
-                                   faction_cut_pct, bounty_cost=0, per_assist=0, pay_outside_hits=0):
+                                   faction_cut_pct, bounty_cost=0, per_assist=0,
+                                   pay_outside_hits=0, per_outside_hit=0):
         """
         Calculate payouts using official CSV data.
         
@@ -107,6 +109,7 @@ class CSVWarPayoutCalculator:
             bounty_cost: Bounty cost to deduct (flat)
             per_assist: Payment per assist (from database)
             pay_outside_hits: Whether to pay for hits outside war
+            per_outside_hit: Flat payment for each eligible outside hit
         
         Returns:
             Dict with summary and payouts for display
@@ -166,6 +169,7 @@ class CSVWarPayoutCalculator:
         
         # Build payouts using CSV respect + database assists
         player_payouts = []
+        payouts_by_player_id = {}
         total_assist_cost = 0
         
         for member in members:
@@ -179,7 +183,7 @@ class CSVWarPayoutCalculator:
             assist_cost = assist_count * per_assist
             total_assist_cost += assist_cost
             
-            player_payouts.append({
+            player_payout = {
                 "player_id": player_id,
                 "player_name": name,
                 "num_hits": attacks,
@@ -189,7 +193,48 @@ class CSVWarPayoutCalculator:
                 "war_respect": war_respect,
                 "outside_respect": 0,
                 "total_respect": war_respect,
-            })
+            }
+            player_payouts.append(player_payout)
+            payouts_by_player_id[player_id] = player_payout
+
+        if pay_outside_hits:
+            outside_query = self.database.select("""
+                SELECT attacker_id, attacker_name, COUNT(*) as outside_count,
+                       SUM(respect_gain) as outside_respect
+                FROM attacks
+                WHERE attacker_faction_id = ?
+                AND timestamp_started >= ?
+                AND timestamp_started <= ?
+                AND COALESCE(defender_faction_id, 0) != ?
+                AND result != 'Assist'
+                AND COALESCE(respect_gain, 0) > 0
+                GROUP BY attacker_id, attacker_name
+            """, (our_faction_id, war_start, war_end, opponent_faction_id))
+
+            for row in outside_query or []:
+                player_id = row["attacker_id"]
+                outside_count = row["outside_count"]
+                outside_respect = row["outside_respect"] or 0
+                player_payout = payouts_by_player_id.get(player_id)
+                if player_payout:
+                    player_payout["num_hits"] += outside_count
+                    player_payout["num_outside"] = outside_count
+                    player_payout["outside_respect"] = outside_respect
+                    continue
+
+                player_payout = {
+                    "player_id": player_id,
+                    "player_name": row["attacker_name"],
+                    "num_hits": outside_count,
+                    "num_war_hits": 0,
+                    "num_assists": 0,
+                    "num_outside": outside_count,
+                    "war_respect": 0,
+                    "outside_respect": outside_respect,
+                    "total_respect": 0,
+                }
+                player_payouts.append(player_payout)
+                payouts_by_player_id[player_id] = player_payout
         
         # Calculate payout pool
         faction_cut_amount = total_payout * (faction_cut_pct / 100.0)
@@ -203,7 +248,9 @@ class CSVWarPayoutCalculator:
         # Build final payouts
         payouts = []
         for player_payout in player_payouts:
-            if player_payout["total_respect"] == 0 and player_payout["num_assists"] == 0:
+            if (player_payout["total_respect"] == 0
+                    and player_payout["num_assists"] == 0
+                    and player_payout["num_outside"] == 0):
                 continue  # Skip players with no contribution
             
             respect_pct = (player_payout["total_respect"] / total_csv_respect) * 100 if total_csv_respect > 0 else 0
@@ -211,9 +258,10 @@ class CSVWarPayoutCalculator:
             
             # Assist payout
             assist_payout = player_payout["num_assists"] * per_assist
+            outside_payout = player_payout["num_outside"] * per_outside_hit
             
             # Total player share
-            player_share = respect_share + assist_payout
+            player_share = round_currency(respect_share + assist_payout + outside_payout)
             
             payout_obj = {
                 "player_id": player_payout["player_id"],
@@ -228,7 +276,7 @@ class CSVWarPayoutCalculator:
                 "respect_pct": respect_pct,
                 "respect_share": respect_share,
                 "assist_payout": assist_payout,
-                "outside_payout": 0,
+                "outside_payout": outside_payout,
                 "player_share": player_share,
             }
             payouts.append(payout_obj)
@@ -249,7 +297,7 @@ class CSVWarPayoutCalculator:
                 assist_payout=payout_obj["assist_payout"],
                 outside_hits=payout_obj["num_outside"],
                 outside_respect=payout_obj["outside_respect"],
-                outside_payout=0,
+                outside_payout=payout_obj["outside_payout"],
                 total_respect=payout_obj["total_respect"],
                 regular_respect=0,
                 chain_bonus_respect=0,
@@ -283,5 +331,7 @@ class CSVWarPayoutCalculator:
             "dollar_per_respect": dollar_per_respect,
             "per_assist": per_assist,
             "pay_outside_hits": pay_outside_hits,
+            "per_outside_hit": per_outside_hit,
+            "total_outside_cost": sum(payout["outside_payout"] for payout in payouts),
             "payouts": payouts,
         }

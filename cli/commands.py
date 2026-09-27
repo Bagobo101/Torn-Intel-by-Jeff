@@ -25,6 +25,8 @@ class CLI:
                     item=getattr(args, 'item', None),
                     category=getattr(args, 'category', None),
                     event_type=getattr(args, 'event_type', None),
+                    from_timestamp=getattr(args, 'from_timestamp', None),
+                    to_timestamp=getattr(args, 'to_timestamp', None),
                     limit=args.limit,
                     oldest_first=args.oldest,
                     faction=getattr(args, 'faction', None),
@@ -61,6 +63,7 @@ class CLI:
                 bounty_cost=getattr(args, 'bounty_cost', 0),
                 per_assist=getattr(args, 'per_assist', 0),
                 pay_outside_hits=getattr(args, 'pay_outside_hits', 0),
+                per_outside_hit=getattr(args, 'per_outside_hit', 0),
                 stacking_days=getattr(args, 'stacking_days', 0),
                 temp_return_days=getattr(args, 'temp_return_days', 2),
                 faction=getattr(args, 'faction', None),
@@ -124,6 +127,7 @@ class CLI:
                 bounty_cost=args.bounty_cost,
                 per_assist=args.per_assist,
                 pay_outside_hits=args.pay_outside_hits,
+                per_outside_hit=args.per_outside_hit,
             )
 
         elif args.command == "payout_csv":
@@ -138,6 +142,7 @@ class CLI:
                 bounty_cost=args.bounty_cost,
                 per_assist=args.per_assist,
                 pay_outside_hits=args.pay_outside_hits,
+                per_outside_hit=args.per_outside_hit,
             )
 
         elif args.command == "watch":
@@ -146,6 +151,7 @@ class CLI:
                 args.module,
                 cooldown=args.cooldown,
                 duration=args.duration,
+                faction=getattr(args, 'faction', None),
             )
 
         elif args.command == "shoplifting":

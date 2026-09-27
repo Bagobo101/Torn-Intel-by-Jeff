@@ -184,6 +184,34 @@ class TornGateway:
             pool=pool,
         )
 
+    def faction_balance(self, pool="default"):
+        """Faction vault balances; the key owner needs faction API access."""
+
+        return self._get_v2(
+            "faction",
+            "balance",
+            pool=pool,
+        )
+
+    def faction_funds_news(self, pool="default"):
+        """Faction vault transaction news (give-to-user, deposits)."""
+
+        return self._get_v1(
+            "faction",
+            "fundsnews",
+            pool=pool,
+        )
+
+    def user_discord(self, discord_id, pool="default"):
+        """Look up a Torn user by Discord ID; only works if they linked Discord in Torn."""
+
+        return self._get_v1(
+            "user",
+            "discord",
+            resource_id=discord_id,
+            pool=pool,
+        )
+
     def torn_items(self, pool="GLOBAL"):
 
         return self._get_v1(

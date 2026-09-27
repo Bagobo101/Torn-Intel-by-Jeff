@@ -124,7 +124,65 @@ class CrimeReport:
 
     #########################################################
 
-    def _min_cpr(self, rules, crime_name, difficulty, position):
+    def _crp_table_path(self, faction_tag=None):
+        root = Path(__file__).resolve().parents[2]
+        # GTH keeps its own CPR thresholds; every other faction uses the base table.
+        if str(faction_tag or "").strip().upper() == "GTH":
+            return root / "data" / "oc_crp_table_gth.json"
+        return root / "data" / "oc_crp_table.json"
+
+    #########################################################
+
+    def _load_crp_table(self, faction_tag=None):
+        path = self._crp_table_path(faction_tag)
+        cache = getattr(self, "_crp_table_cache", None)
+        if cache is None:
+            cache = {}
+            self._crp_table_cache = cache
+
+        key = str(path)
+        if key in cache:
+            return cache[key]
+
+        table = {}
+        try:
+            with path.open("r", encoding="utf-8") as f:
+                payload = json.load(f)
+            for crime in payload.get("crimes", []) or []:
+                name = str(crime.get("name") or "").strip().lower()
+                if not name:
+                    continue
+                positions = {}
+                for role in crime.get("roles", []) or []:
+                    position = str(role.get("position") or "").strip().lower()
+                    if position:
+                        positions[position] = int(role.get("min_cpr", 0) or 0)
+                table[name] = {
+                    "tier": int(crime.get("tier", 0) or 0),
+                    "positions": positions,
+                }
+        except FileNotFoundError:
+            pass
+        except Exception as exc:
+            self.logger.warning(f"Could not parse OC CRP table {path}: {exc}")
+
+        cache[key] = table
+        return table
+
+    #########################################################
+
+    def _min_cpr(self, rules, crime_name, difficulty, position, faction_tag=None):
+        crp_table = self._load_crp_table(faction_tag)
+        entry = crp_table.get(str(crime_name).strip().lower())
+        if entry:
+            positions = entry.get("positions", {})
+            min_cpr = positions.get(str(position).strip().lower())
+            if min_cpr is not None:
+                return int(min_cpr)
+            if positions:
+                # Unrecognized position label for a known crime: use the toughest role as a safe default.
+                return max(positions.values())
+
         overrides = rules.get("crime_overrides", {}) if isinstance(rules, dict) else {}
 
         selected = None
@@ -676,7 +734,8 @@ class CrimeReport:
             user_id = int(slot["user_id"] or 0)
             position = str(slot["slot_position"] or "")
             cpr = int(slot["checkpoint_pass_rate"] or 0)
-            min_cpr = self._min_cpr(rules, slot["crime_name"], level, position)
+            slot_faction = slot.get("faction_tag") or faction
+            min_cpr = self._min_cpr(rules, slot["crime_name"], level, position, faction_tag=slot_faction)
 
             best = best_lookup.get((user_id, level, position.strip().lower()), cpr)
             if cpr < min_cpr - 2:

@@ -179,3 +179,125 @@ def test_track_flying_delays_waits_until_planning_timer_is_over(tmp_path):
     assert int(active["duration_seconds"]) == 300
 
     database.close()
+
+
+def test_track_flying_delays_does_not_resolve_on_empty_snapshot(tmp_path):
+    repo, database = _build_repo(tmp_path)
+
+    members = [
+        {
+            "user_id": 303,
+            "user_name": "Diablom",
+            "position": "Member",
+            "is_in_oc": 1,
+            "status_state": "Abroad",
+            "status_description": "In South Africa",
+            "last_action": 0,
+            "updated_at": 1000,
+        }
+    ]
+    slots = [
+        {
+            "crime_id": 999,
+            "crime_name": "Best of the Lot",
+            "difficulty": 2,
+            "status": "Planning",
+            "user_id": 303,
+            "user_name": "Diablom",
+            "slot_position": "Muscle",
+        }
+    ]
+
+    # Initial delay starts
+    summary = repo.track_flying_delays(
+        slots,
+        members,
+        crime_status_rows=[{"crime_id": 999, "status": "Planning", "ready_at": 1000}],
+        observed_at=1000,
+    )
+    assert summary == {"active": 1, "started": 1, "resolved": 0}
+    notifications = repo.list_unposted_delay_notifications(limit=10)
+    assert len(notifications) == 1
+    assert str(notifications[0]["event_type"]) == "crime_delay_started"
+
+    # Transient API failure: members list is empty
+    summary = repo.track_flying_delays(
+        [],
+        [],
+        crime_status_rows=[],
+        observed_at=1060,
+    )
+    assert summary["resolved"] == 0
+    active = repo.active_delay_events(limit=10)
+    assert len(active) == 1  # Delay is still open, not resolved!
+
+    # Transient API glitch: slots missing for crime still in planning
+    summary = repo.track_flying_delays(
+        [],
+        members,
+        crime_status_rows=[{"crime_id": 999, "status": "Planning", "ready_at": 1000}],
+        observed_at=1120,
+    )
+    assert summary["resolved"] == 0
+    active = repo.active_delay_events(limit=10)
+    assert len(active) == 1  # Delay is still open!
+
+    # Member in hospital abroad is still detected as flying/blocking
+    members[0]["status_state"] = "Hospital"
+    members[0]["status_description"] = "In a South African hospital for 15 mins"
+    summary = repo.track_flying_delays(
+        slots,
+        members,
+        crime_status_rows=[{"crime_id": 999, "status": "Planning", "ready_at": 1000}],
+        observed_at=1180,
+    )
+    assert summary["resolved"] == 0
+    active = repo.active_delay_events(limit=10)
+    assert len(active) == 1
+
+    # Notifications still only contains 1 start event (no false resolved/started cycle)
+    notifications = repo.list_unposted_delay_notifications(limit=10)
+    assert len(notifications) == 1
+
+    database.close()
+
+
+def test_parse_slots_preserves_assigned_members_without_item_requirement():
+    from modules.crimes.parser import CrimeParser
+
+    response = {
+        "crimes": {
+            "2151682": {
+                "id": 2151682,
+                "name": "Best of the Lot",
+                "difficulty": 2,
+                "status": "Planning",
+                "slots": [
+                    {
+                        "position": "Car Thief",
+                        "checkpoint_pass_rate": 80,
+                        "user": {"id": 101, "name": "DriverGuy"},
+                        "item_requirement": {"id": 50, "name": "Slim Jim", "is_available": True},
+                    },
+                    {
+                        "position": "Muscle",
+                        "checkpoint_pass_rate": 75,
+                        "user": {"id": 202, "name": "Diablom"},
+                        "item_requirement": None,
+                    },
+                    {
+                        "position": "Imitator",
+                        "checkpoint_pass_rate": 0,
+                        "user": None,
+                        "item_requirement": None,
+                    },
+                ],
+            }
+        }
+    }
+
+    slots = CrimeParser.parse_slots(response)
+    # Should include both DriverGuy (with item) and Diablom (without item), skipping unassigned slot without item
+    assert len(slots) == 2
+    user_ids = {s["user_id"] for s in slots}
+    assert user_ids == {101, 202}

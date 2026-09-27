@@ -46,6 +46,21 @@ class AttackSync(BaseSync):
                 return cfg.faction_id, cfg.tag
         return settings.faction_id if settings else None, "GTS"
 
+    def _adopt_legacy_attacks(self, faction_id, faction_tag):
+        """Tag pre-multi-faction rows (faction_tag IS NULL) that belong to this faction, once per process."""
+        adopted_key = getattr(self, "_adopted_factions", None)
+        if adopted_key is None:
+            adopted_key = set()
+            self._adopted_factions = adopted_key
+
+        if faction_tag in adopted_key:
+            return
+
+        adopted = self.repo.adopt_untagged(faction_tag, faction_id)
+        if adopted:
+            self.logger.info(f"Adopted {adopted} legacy untagged attack(s) into faction {faction_tag}")
+        adopted_key.add(faction_tag)
+
     def sync(self, mode="backfill", filters=None, faction=None, **kwargs):
 
         if str(faction or "").strip().lower() == "all":
@@ -81,6 +96,7 @@ class AttackSync(BaseSync):
         Walk backward through attack history, importing any records not yet synced.
         """
         faction_id, faction_tag = self._resolve_faction_meta(faction)
+        self._adopt_legacy_attacks(faction_id, faction_tag)
         total = 0
         checkpoint_key = f"attacks_backfill_{faction_tag}"
 
@@ -146,6 +162,7 @@ class AttackSync(BaseSync):
     def _live(self, filters, faction=None):
 
         faction_id, faction_tag = self._resolve_faction_meta(faction)
+        self._adopt_legacy_attacks(faction_id, faction_tag)
         last_id = self.repo.latest_attack(faction_tag=faction_tag)
 
         from_timestamp = None

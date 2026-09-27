@@ -12,7 +12,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 from modules.revives.sync import ReviveSync
+from repositories.bank_request_repository import BankRequestRepository
 from repositories.revive_request_repository import ReviveRequestRepository
+from services.bank_balance import resolve_withdrawal
 from utils.colors import highlight, info, muted, success
 
 
@@ -24,6 +26,7 @@ class ReviveRequestListener:
     def __init__(self, services):
         self.services = services
         self.repo = ReviveRequestRepository(services.database)
+        self.bank_repo = BankRequestRepository(services.database)
 
     #######################################################
 
@@ -34,7 +37,9 @@ class ReviveRequestListener:
         poll_seconds = max(1, int(poll_seconds or 15))
         window_seconds = max(60, int(window_seconds or 21600))
         logger = self.services.logger
+        services = self.services
         repo = self.repo
+        bank_repo = self.bank_repo
         syncer = ReviveSync(self.services)
         notification_condition = threading.Condition()
 
@@ -180,6 +185,21 @@ class ReviveRequestListener:
                         )
                         return
 
+                    if path == "/factions":
+                        factions = services.settings.list_factions()
+                        self._send_json(
+                            200,
+                            {
+                                "ok": True,
+                                "default_faction": services.settings.default_faction.tag,
+                                "factions": [
+                                    {"tag": faction.tag, "name": faction.name}
+                                    for faction in factions
+                                ],
+                            },
+                        )
+                        return
+
                     if "revive-request" in raw_path and "notifications" in raw_path:
                         query = parse_qs(parsed.query)
                         requester_id = query.get("requester_id", [None])[0]
@@ -248,17 +268,21 @@ class ReviveRequestListener:
                 return
 
             def do_POST(self):
-                if self.path != "/revive-request":
+                if self.path not in ("/revive-request", "/bank-request"):
                     self._send_json(404, {"ok": False, "error": "not_found"})
                     return
 
-                length = int(self.headers.get("Content-Length") or 0)
+                length = min(int(self.headers.get("Content-Length") or 0), 65536)
                 raw = self.rfile.read(length) if length > 0 else b"{}"
 
                 try:
                     payload = json.loads(raw.decode("utf-8"))
                 except Exception:
                     self._send_json(400, {"ok": False, "error": "invalid_json"})
+                    return
+
+                if self.path == "/bank-request":
+                    self._handle_bank_request(payload)
                     return
 
                 try:
@@ -318,6 +342,52 @@ class ReviveRequestListener:
                 except Exception as exc:
                     logger.error(f"Revive listener error: {type(exc).__name__}: {exc}")
                     self._send_json(500, {"ok": False, "error": "internal_error"})
+
+            def _handle_bank_request(self, payload):
+                try:
+                    request_payload = dict(payload) if isinstance(payload, dict) else {}
+                    try:
+                        requester_id = int(request_payload.get("requester_id"))
+                    except (TypeError, ValueError):
+                        raise ValueError("Could not determine your Torn ID from the page.")
+                    resolved = resolve_withdrawal(
+                        services.gateway,
+                        services.settings,
+                        requester_id,
+                        request_payload.get("amount"),
+                        preferred_tag=request_payload.get("faction_tag"),
+                    )
+                    request_payload.update(
+                        requester_id=requester_id,
+                        faction_tag=resolved["faction"].tag,
+                        amount=resolved["amount"],
+                        requested_text=resolved["requested_text"],
+                        balance=resolved["balance"],
+                    )
+                    row = bank_repo.create_request(request_payload)
+                except ValueError as exc:
+                    self._send_json(400, {"ok": False, "error": str(exc)})
+                    return
+                except Exception as exc:
+                    logger.error(f"Bank request error: {type(exc).__name__}: {exc}")
+                    self._send_json(500, {"ok": False, "error": "internal_error"})
+                    return
+
+                amount_text = f"${row['amount']:,}"
+                logger.info(
+                    f"{info('Bank request received')} {highlight(row['requester_name'])} "
+                    f"[{row['requester_id'] or '?'}] faction={row['faction_tag']} "
+                    f"amount={success(amount_text)} ({muted(row['request_id'])})"
+                )
+                self._send_json(
+                    200,
+                    {
+                        "ok": True,
+                        "capped": resolved["capped"],
+                        "faction_name": resolved["faction"].name,
+                        "request": {k: v for k, v in row.items() if k not in ("raw_payload", "balance")},
+                    },
+                )
 
             def log_message(self, _format, *_args):
                 return
