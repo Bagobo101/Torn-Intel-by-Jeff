@@ -2707,7 +2707,7 @@ def serve_discord_bot(
     def bank_fill_url(requester_id, amount):
         return (
             "https://www.torn.com/factions.php?step=your#/tab=controls&option=give-to-user"
-            f"&addMoneyTo={int(requester_id)}&money={int(amount)}"
+            f"&giveMoneyTo={int(requester_id)}&money={int(amount)}"
         )
 
     def resolve_banker_roles(guild, faction_tag):
