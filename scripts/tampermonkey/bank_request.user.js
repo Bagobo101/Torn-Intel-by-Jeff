@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TornIntel Bank Request
 // @namespace    http://tampermonkey.net/
-// @version      0.2.0
+// @version      0.5.0
 // @description  Request money from the faction vault; posts to the TornIntel Discord bot with a prefilled fulfill link.
 // @author       TornIntel
 // @match        https://www.torn.com/*
