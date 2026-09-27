@@ -46,7 +46,7 @@ BANK_REQUEST_ADDED_COLUMNS = {
 MAX_BANK_AMOUNT = 1_000_000_000_000
 BANK_REQUEST_TIMEOUT_SECONDS = 3600
 # How long after a banker clicks Fulfill we keep checking faction funds news for the payment.
-BANK_VERIFY_WINDOW_SECONDS = 600
+BANK_VERIFY_WINDOW_SECONDS = 300
 
 
 def bank_request_migrations(existing_columns):
