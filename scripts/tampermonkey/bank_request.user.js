@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TornIntel Bank Request
 // @namespace    http://tampermonkey.net/
-// @version      0.6.0
+// @version      0.6.1
 // @description  Request money from the faction vault; posts to the TornIntel Discord bot with a prefilled fulfill link.
 // @author       TornIntel
 // @match        https://www.torn.com/*
@@ -14,8 +14,9 @@
 // @grant        GM_registerMenuCommand
 // @homepageURL  https://github.com/xDp64xG/Torn-Intel
 // @supportURL   https://github.com/xDp64xG/Torn-Intel/issues
-// @updateURL    https://raw.githubusercontent.com/xDp64xG/Torn-Intel/main/scripts/tampermonkey/bank_request.user.js
-// @downloadURL  https://raw.githubusercontent.com/xDp64xG/Torn-Intel/main/scripts/tampermonkey/bank_request.user.js
+// @updateURL   https://raw.githubusercontent.com/Bagobo101/Torn-Intel-by-Jeff/main/scripts/tampermonkey/bank_request.user.js
+// @downloadURL https://raw.githubusercontent.com/Bagobo101/Torn-Intel-by-Jeff/main/scripts/tampermonkey/bank_request.user.js
+
 // ==/UserScript==
 
 (() => {
