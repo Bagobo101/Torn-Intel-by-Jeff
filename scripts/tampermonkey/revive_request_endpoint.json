@@ -1,7 +1,7 @@
 {
   "base_urls": [
-    "https://eye-states-entering-manor.trycloudflare.com",
+    "https://ref-consist-tab-dayton.trycloudflare.com",
     "http://10.0.0.52:8765"
   ],
-  "base_url": "http://10.0.0.52:8765"
+  "base_url": "https://ref-consist-tab-dayton.trycloudflare.com"
 }
