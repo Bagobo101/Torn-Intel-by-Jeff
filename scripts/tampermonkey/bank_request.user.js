@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TornIntel Bank Request
 // @namespace    http://tampermonkey.net/
-// @version      0.5.0
+// @version      0.6.0
 // @description  Request money from the faction vault; posts to the TornIntel Discord bot with a prefilled fulfill link.
 // @author       TornIntel
 // @match        https://www.torn.com/*
@@ -24,8 +24,7 @@
     const DEFAULT_BASE_URLS = ['http://127.0.0.1:8765', 'http://localhost:8765'];
     const DISCOVERY_URL = 'https://raw.githubusercontent.com/xDp64xG/Torn-Intel/main/scripts/tampermonkey/revive_request_endpoint.json';
     const OVERRIDE_KEY = 'tornintel_bank_listener_override';
-    const BUTTON_POSITION_KEY = 'tornintel_bank_button_position';
-    const BUTTON_ID = 'tornintel-bank-btn';
+    const MENU_ITEM_ID = 'tornintel-bank-menu-item';
     const MODAL_ID = 'tornintel-bank-modal';
     const MAX_AMOUNT = 1e12;
 
@@ -130,12 +129,6 @@
     };
 
     GM_addStyle(`
-        #${BUTTON_ID} {
-            position: fixed; left: 12px; bottom: calc(12px + env(safe-area-inset-bottom, 0px)); z-index: 2147483645;
-            padding: 5px 10px; border: none; border-radius: 6px; cursor: grab; touch-action: none;
-            background: #2e7d32; color: #fff; font-size: 12px; font-weight: 700;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.35);
-        }
         #${MODAL_ID} {
             position: fixed; inset: 0; z-index: 2147483646; display: flex; align-items: center; justify-content: center;
             background: rgba(0,0,0,0.55);
@@ -242,67 +235,34 @@
         input.focus();
     };
 
-    const mountButton = () => {
-        if (!document.body || document.getElementById(BUTTON_ID)) return;
-        const btn = document.createElement('button');
-        btn.id = BUTTON_ID;
-        btn.type = 'button';
-        btn.textContent = 'Bank';
-        let pointerStart = null;
-        let dragged = false;
-        const savedPosition = getValue(BUTTON_POSITION_KEY, null);
-        if (savedPosition && Number.isFinite(savedPosition.left) && Number.isFinite(savedPosition.top)) {
-            btn.style.left = `${savedPosition.left}px`;
-            btn.style.top = `${savedPosition.top}px`;
-            btn.style.bottom = 'auto';
-        }
-        btn.addEventListener('pointerdown', event => {
-            if (event.button !== 0) return;
-            pointerStart = {
-                pointerId: event.pointerId,
-                x: event.clientX,
-                y: event.clientY,
-                left: btn.getBoundingClientRect().left,
-                top: btn.getBoundingClientRect().top
-            };
-            dragged = false;
-            btn.setPointerCapture(event.pointerId);
-        });
-        btn.addEventListener('pointermove', event => {
-            if (!pointerStart || pointerStart.pointerId !== event.pointerId) return;
-            const deltaX = event.clientX - pointerStart.x;
-            const deltaY = event.clientY - pointerStart.y;
-            if (!dragged && Math.hypot(deltaX, deltaY) < 5) return;
-            dragged = true;
-            const left = Math.max(0, Math.min(window.innerWidth - btn.offsetWidth, pointerStart.left + deltaX));
-            const top = Math.max(0, Math.min(window.innerHeight - btn.offsetHeight, pointerStart.top + deltaY));
-            btn.style.left = `${left}px`;
-            btn.style.top = `${top}px`;
-            btn.style.bottom = 'auto';
-            btn.style.cursor = 'grabbing';
-        });
-        const stopDragging = event => {
-            if (!pointerStart || pointerStart.pointerId !== event.pointerId) return;
-            if (dragged) {
-                const bounds = btn.getBoundingClientRect();
-                setValue(BUTTON_POSITION_KEY, { left: bounds.left, top: bounds.top });
-            }
-            pointerStart = null;
-            btn.style.cursor = 'grab';
-        };
-        btn.addEventListener('pointerup', stopDragging);
-        btn.addEventListener('pointercancel', stopDragging);
-        btn.addEventListener('click', event => {
-            if (dragged) {
-                event.preventDefault();
-                dragged = false;
-                return;
-            }
+    // Adds a "Bank Request" entry to Torn's profile dropdown (ul.settings-menu), like Scouter Target Finder.
+    const injectMenuItem = () => {
+        const menu = document.querySelector('ul.settings-menu');
+        if (!menu || document.getElementById(MENU_ITEM_ID)) return;
+
+        const li = document.createElement('li');
+        li.id = MENU_ITEM_ID;
+        li.className = 'setting tornintel-bank-item';
+        li.innerHTML = `
+            <label class="setting-container" style="cursor:pointer">
+                <div class="icon-wrapper">
+                    <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M11.8 10.9c-2.27-.59-3-1.2-3-2.15 0-1.09 1.01-1.85 2.7-1.85 1.78 0 2.44.85 2.5 2.1h2.21c-.07-1.72-1.12-3.3-3.21-3.81V3h-3v2.16c-1.94.42-3.5 1.68-3.5 3.61 0 2.31 1.91 3.46 4.7 4.13 2.5.6 3 1.48 3 2.41 0 .69-.49 1.79-2.7 1.79-2.06 0-2.87-.92-2.98-2.1h-2.2c.12 2.19 1.76 3.42 3.68 3.83V21h3v-2.15c1.95-.37 3.5-1.5 3.5-3.55 0-2.84-2.43-3.81-4.7-4.4z"/></svg>
+                </div>
+                <span class="setting-name">Bank Request</span>
+            </label>`;
+
+        const settingsLink = menu.querySelector('li.link a[href="/preferences.php"]');
+        const logoutLink = menu.querySelector('li.link a[href^="/logout.php"]');
+        const anchor = settingsLink?.parentElement || logoutLink?.parentElement;
+        if (anchor) menu.insertBefore(li, anchor);
+        else menu.appendChild(li);
+
+        li.addEventListener('click', event => {
+            event.preventDefault();
             openModal();
         });
-        document.body.appendChild(btn);
     };
 
-    mountButton();
-    window.setInterval(mountButton, 5000);
+    new MutationObserver(injectMenuItem).observe(document.body, { childList: true, subtree: true });
+    injectMenuItem();
 })();
