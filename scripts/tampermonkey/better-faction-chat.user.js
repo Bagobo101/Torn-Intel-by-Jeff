@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Better Faction Chat – Torn.com (Desktop + Torn PDA)
 // @namespace    https://torn.com/
-// @version      2.1.2
-// @description  Desktop and Torn PDA faction chat tools: status, group tags, officer groups, search, timestamps, reactions and touch-friendly controls
+// @version      2.9.0
+// @description  Desktop and Torn PDA faction chat tools: status, group tags, officer groups, search, timestamps, reactions, image uploads, GIFs and touch-friendly controls
 // @author       sercann
 // @match        https://www.torn.com/*
 // @grant        GM_setValue
@@ -12,6 +12,10 @@
 // @grant        GM_setClipboard
 // @connect      api.torn.com
 // @connect      raw.githubusercontent.com
+// @connect      api.klipy.com
+// @connect      static.klipy.com
+// @connect      freeimage.host
+// @connect      api.imgbb.com
 // @connect      trycloudflare.com
 // @connect      127.0.0.1
 // @connect      localhost
@@ -25,7 +29,7 @@
 (function () {
     'use strict';
 
-    const BFC_VERSION = '2.1.2';
+    const BFC_VERSION = '2.9.0';
     const STORE_KEY   = 'bfc_settings_v2';
     const API_BASE    = 'https://api.torn.com';
     const PDA_KEY     = '###PDA-APIKEY###';
@@ -50,11 +54,19 @@
         quickReactions:   ['👍', '😂', '❤️', '🔥'],
         reactionNotify:   true,
         reactionsEnabled: true,
+        imagePreviews:    true,
+        imageAutoSend:    true,
+        imageAnyHost:     false,
+        imgbbKey:         '',
+        klipyKey:         '',
+        klipyCid:         '',
+        imageHost:        'freeimage',   // 'freeimage' (no key) | 'imgbb' (needs key)
         reactionServer:   '',
         officerIds:       [],
         statusColors: { online: '#00e676', idle: '#ffab40', offline: '#546e7a' },
         mentionColor:     '#ff5252',
         accentColor:      '#29b6f6',
+        uiMode:           'auto',   // 'auto' | 'mobile' | 'desktop'
     };
 
     // Accepts an array or a space/comma separated string; keeps up to 6 unique emoji.
@@ -122,6 +134,20 @@
         CFG.apiKey = PDA_KEY;
         saveCfg(CFG);
     }
+
+    // ---- UI mode: Auto (detect), Mobile (forced) or Desktop (forced) ----
+    const UI_MODES = ['auto', 'mobile', 'desktop'];
+    if (!UI_MODES.includes(CFG.uiMode)) CFG.uiMode = 'auto';
+    function isMobile() {
+        return CFG.uiMode === 'mobile' || (CFG.uiMode === 'auto' && IS_TORN_PDA);
+    }
+    // Media queries used by the stylesheet: auto follows the device, forced modes override it.
+    const MQ_MOBILE = CFG.uiMode === 'mobile' ? '@media all'
+                    : CFG.uiMode === 'desktop' ? '@media not all'
+                    : '@media (pointer: coarse)';
+    const MQ_HOVER  = CFG.uiMode === 'mobile' ? '@media not all'
+                    : CFG.uiMode === 'desktop' ? '@media all'
+                    : '@media (hover: hover) and (pointer: fine)';
 
     const STATE_ICONS = {
         traveling: '✈️', abroad: '🌍', hospital: '🏥',
@@ -219,13 +245,37 @@
         .bfc-msg-container.bfc-has-rx .bfc-cp-btn { top:4px; transform:none; }
 
         .bfc-qr { position:absolute; right:28px; top:2px; display:none; gap:2px; padding:2px 3px; background:#1b1f24; border:1px solid #3a3f46; border-radius:12px; box-shadow:0 2px 8px rgba(0,0,0,.5); z-index:11; }
-        .bfc-msg-container:hover .bfc-qr, .bfc-qr.bfc-open { display:inline-flex; }
+        .bfc-qr.bfc-open { display:inline-flex; }
+        ${MQ_HOVER} { .bfc-msg-container:hover .bfc-qr { display:inline-flex; } }
         .bfc-qr-btn { background:transparent; border:0; border-radius:8px; cursor:pointer; font-size:13px; line-height:1; padding:2px 3px; transition:transform .12s, background .12s; }
         .bfc-qr-btn:hover { background:rgba(255,255,255,.12); transform:scale(1.2); }
         .bfc-qr-btn.bfc-qr-busy { opacity:.45; pointer-events:none; }
         .bfc-msg-container.bfc-has-rx { flex-wrap:wrap; }
+        .bfc-img-wrap { flex:0 0 100%; width:100%; display:flex; flex-wrap:wrap; gap:6px; margin-top:6px; }
+        .bfc-img.bfc-frozen { cursor:pointer; }
+        .bfc-img { max-width:100%; max-height:200px; border-radius:8px; cursor:zoom-in; object-fit:contain; background:#0d1117; }
+        .bfc-lightbox { position:fixed; inset:0; z-index:2147483647; background:rgba(0,0,0,.88); display:flex; align-items:center; justify-content:center; padding:12px; box-sizing:border-box; }
+        .bfc-lightbox img, .bfc-lightbox video { max-width:100%; max-height:100%; object-fit:contain; }
+
+        #bfc-gif-bd { position:fixed; inset:0; z-index:2147483646; background:rgba(0,0,0,.55); display:flex; align-items:center; justify-content:center; padding:10px; box-sizing:border-box; }
+        #bfc-gif-pk { width:420px; max-width:100%; height:520px; max-height:88vh; background:#1b1b1b; border:1px solid #333; border-radius:10px; display:flex; flex-direction:column; overflow:hidden; box-shadow:0 8px 30px rgba(0,0,0,.6); font-family:Arial,sans-serif; }
+        #bfc-gif-hd { display:flex; gap:6px; padding:8px; border-bottom:1px solid #333; }
+        #bfc-gif-q { flex:1; min-width:0; background:#111; color:#eee; border:1px solid #444; border-radius:6px; padding:8px 10px; font-size:14px; outline:none; }
+        #bfc-gif-x { background:#2a2a2a; color:#ddd; border:1px solid #444; border-radius:6px; padding:0 12px; font-size:15px; cursor:pointer; }
+        #bfc-gif-grid { flex:1; overflow-y:auto; padding:6px; display:grid; grid-template-columns:repeat(3,1fr); gap:5px; align-content:start; grid-auto-rows:120px; -webkit-overflow-scrolling:touch; }
+        #bfc-gif-grid .bfc-gif-it { position:relative !important; display:block !important; width:100% !important; height:120px !important; min-height:0 !important; margin:0 !important; background:#111; border-radius:6px; overflow:hidden !important; cursor:pointer; border:0; padding:0 !important; }
+        #bfc-gif-grid .bfc-gif-it img { position:absolute !important; top:0; left:0; width:100% !important; height:100% !important; max-width:none !important; max-height:none !important; margin:0 !important; object-fit:cover; display:block; }
+        #bfc-gif-msg { grid-column:1/-1; grid-row:auto; text-align:center; color:#9aa; font-size:12px; padding:14px 6px; }
+        #bfc-gif-more { grid-column:1/-1; background:#2a2a2a; color:#ddd; border:1px solid #444; border-radius:6px; padding:9px; font-size:13px; cursor:pointer; }
+        #bfc-gif-ft { padding:5px 8px; border-top:1px solid #333; font-size:10px; color:#778; text-align:right; }
+        @media (max-width:600px) { #bfc-gif-bd { align-items:flex-end; padding:0; } #bfc-gif-pk { width:100%; height:70vh; border-radius:12px 12px 0 0; } }
         .bfc-rx-row { display:flex; flex-wrap:wrap; gap:4px; flex-basis:100%; width:100%; order:99; margin:3px 0 1px; }
         .bfc-rx-chip { display:inline-flex; align-items:center; gap:3px; background:#22272e; border:1px solid #3a3f46; border-radius:10px; color:#c9d1d9; cursor:pointer; font-size:11px; line-height:1; padding:2px 7px; }
+        #bfc-rx-who { position:fixed; z-index:2147483000; max-width:240px; background:#161b22; border:1px solid #3a3f46; border-radius:8px; box-shadow:0 4px 14px rgba(0,0,0,.55); color:#e6edf3; font-size:12px; line-height:1.4; padding:6px 9px; pointer-events:none; display:none; }
+        #bfc-rx-who.bfc-open { display:block; }
+        #bfc-rx-who .bfc-rx-who-h { font-weight:700; margin-bottom:2px; }
+        #bfc-rx-who .bfc-rx-who-n { word-wrap:break-word; }
+        .bfc-rx-lp { -webkit-user-select:none; user-select:none; -webkit-touch-callout:none; }
         .bfc-rx-chip:hover { background:#2d333b; border-color:#58616b; }
         .bfc-rx-chip.bfc-rx-mine { background:rgba(41,182,246,.18); border-color:#29b6f6; color:#e6f6ff; }
         .bfc-reacted { box-shadow:inset 3px 0 0 #ffd54f; animation:bfc-react-pulse 1.2s ease-in-out 3; }
@@ -310,14 +360,16 @@
 
 
         /* Torn PDA / touch layout */
-        @media (pointer: coarse) {
+        ${MQ_MOBILE} {
             #bfc-gear-btn { width:46px; height:46px; font-size:20px; bottom:max(12px, env(safe-area-inset-bottom)); left:12px; touch-action:manipulation; }
             #bfc-panel { left:8px; right:8px; bottom:calc(66px + env(safe-area-inset-bottom)); width:auto; max-height:82vh; border-radius:12px; }
             #bfc-pb { max-height:calc(82vh - 98px); padding:12px; -webkit-overflow-scrolling:touch; }
-            #bfc-toolbar { flex-wrap:wrap; padding:7px; }
-            #bfc-toolbar .bfc-tb-group { flex-wrap:wrap; }
-            .bfc-tb-btn { min-height:36px; padding:7px 10px; font-size:12px; touch-action:manipulation; }
-            #bfc-status-pill { min-height:30px; display:inline-flex; align-items:center; }
+            #bfc-toolbar { flex-wrap:wrap; padding:4px 6px; gap:4px; }
+            #bfc-toolbar .bfc-tb-group:first-child { flex:0 0 auto; flex-wrap:nowrap; gap:3px; }
+            #bfc-toolbar .bfc-tb-group:last-child { flex:1 0 auto; justify-content:flex-end; }
+            .bfc-tb-btn { min-height:32px; min-width:32px; padding:4px 7px; font-size:11px; touch-action:manipulation; text-align:center; }
+            .bfc-tb-btn .bfc-tb-lbl { display:none; }
+            #bfc-status-pill { min-height:24px; display:inline-flex; align-items:center; font-size:12px; font-weight:600; flex:0 0 auto; white-space:nowrap; padding:0 4px; }
             #bfc-tag-popup { min-width:220px; max-width:min(320px, calc(100vw - 16px)); max-height:min(40vh, 320px); }
             .bfc-tag-item { min-height:44px; padding:10px 12px; font-size:14px; touch-action:manipulation; }
             #bfc-member-popup { left:8px!important; right:8px!important; width:auto; max-height:58vh; -webkit-overflow-scrolling:touch; }
@@ -562,7 +614,10 @@
             data = await response.json();
         }
 
-        if (data.error) throw new Error(`Torn API ${data.error.code}: ${data.error.error}`);
+        if (data.error) {
+            if (Number(data.error.code) === 23) throw new Error('Torn API 23: endpoint needs API v2 (update the script)');
+            throw new Error(`Torn API ${data.error.code}: ${data.error.error}`);
+        }
         return data;
     }
 
@@ -597,8 +652,7 @@
     }
 
     async function fetchUserBasic(key) {
-        return userBasic(await apiFetchWithKey('/v2/user/basic', key))
-            || userBasic(await apiFetchWithKey('/user/?selections=basic', key));
+        return userBasic(await apiFetchWithKey('/v2/user/basic', key));
     }
 
     async function fetchMyUsername() {
@@ -615,7 +669,7 @@
     }
 
     async function fetchFactionIdentity() {
-        const d = unwrap(await apiFetch('/v2/faction/basic'), 'basic') || unwrap(await apiFetch('/faction/?selections=basic'), 'basic');
+        const d = unwrap(await apiFetch('/v2/faction/basic'), 'basic');
         if (!d || !d.name) return;
         if (d.name !== CFG.factionName || (d.tag || '') !== CFG.factionTag) {
             CFG.factionName = d.name;
@@ -644,9 +698,9 @@
     async function pollStatuses() {
         if (document.hidden) return;
         lastPollAt = Date.now();
-        let entries = normalizeMembers(await apiFetch('/v2/faction/members'));
-        if (!entries) entries = normalizeMembers(await apiFetch('/faction/?selections=members'));
-        if (!entries || !entries.length) { updatePill('API Error', true); return; }
+        // Torn API v1 selections now return error 23 ("only available in v2"), so only v2 is used.
+        const entries = normalizeMembers(await apiFetch('/v2/faction/members'));
+        if (!entries || !entries.length) { updatePill(lastApiError ? 'API Error: ' + lastApiError : 'API Error', true); return; }
         memberCache = {}; nameIndex = {};
         let counts = { online: 0, idle: 0, offline: 0 };
         entries.forEach(([id, m]) => {
@@ -1355,6 +1409,98 @@
         return names.slice(0, 15).join(', ') + (names.length > 15 ? ` +${names.length - 15} more` : '');
     }
 
+    // ── Torn PDA only: long-press a reaction to see who reacted ────────────────
+    // Desktop keeps its original hover tooltip; none of this is bound when not in mobile mode.
+    let rxWhoEl = null, rxWhoTimer = null, rxWhoHideTimer = null, rxWhoShownAt = 0;
+
+    function rxWhoHide() {
+        clearTimeout(rxWhoTimer);
+        clearTimeout(rxWhoHideTimer);
+        if (rxWhoEl) rxWhoEl.classList.remove('bfc-open');
+    }
+
+    function rxWhoShow(anchor, msgEl, emoji) {
+        const key = msgEl.dataset.bfcKey;
+        const group = key && (rxStore.get(key) || []).find(g => g.emoji === emoji);
+        if (!group || !group.users.length) return false;
+        if (!rxWhoEl) {
+            rxWhoEl = document.createElement('div');
+            rxWhoEl.id = 'bfc-rx-who';
+            document.body.appendChild(rxWhoEl);
+        }
+        rxWhoEl.textContent = '';
+        const h = document.createElement('div');
+        h.className = 'bfc-rx-who-h';
+        h.textContent = `${emoji} ${group.users.length}`;
+        const n = document.createElement('div');
+        n.className = 'bfc-rx-who-n';
+        n.textContent = rxWhoText(group);
+        rxWhoEl.append(h, n);
+        rxWhoEl.style.left = '-9999px';
+        rxWhoEl.style.top = '0px';
+        rxWhoEl.classList.add('bfc-open');
+        const r = anchor.getBoundingClientRect();
+        const w = rxWhoEl.offsetWidth, hgt = rxWhoEl.offsetHeight;
+        const left = Math.min(Math.max(6, r.left + r.width / 2 - w / 2), window.innerWidth - w - 6);
+        let top = r.top - hgt - 6;
+        if (top < 6) top = r.bottom + 6;
+        rxWhoEl.style.left = left + 'px';
+        rxWhoEl.style.top = top + 'px';
+        rxWhoShownAt = Date.now();
+        clearTimeout(rxWhoHideTimer);
+        rxWhoHideTimer = setTimeout(rxWhoHide, 6000);
+        return true;
+    }
+
+    // Long-press (450ms) on `el` shows who reacted with `emoji`. Returns nothing; el.dataset.bfcLp
+    // is stamped when a long-press fired so the click handler can ignore the trailing click.
+    function bindRxLongPress(el, msgEl, emoji) {
+        if (!isMobile()) return;
+        el.classList.add('bfc-rx-lp');
+        let start = null, fired = false;
+        el.addEventListener('touchstart', e => {
+            const t = e.touches[0];
+            start = t ? { x: t.clientX, y: t.clientY } : null;
+            fired = false;
+            clearTimeout(rxWhoTimer);
+            rxWhoTimer = setTimeout(() => {
+                rxWhoTimer = null;
+                if (start && rxWhoShow(el, msgEl, emoji)) {
+                    fired = true;
+                    el.dataset.bfcLp = String(Date.now());
+                }
+            }, 450);
+        }, { passive: true });
+        el.addEventListener('touchmove', e => {
+            const t = e.touches[0];
+            if (!start || !t) return;
+            if (Math.abs(t.clientX - start.x) > 8 || Math.abs(t.clientY - start.y) > 8) {
+                start = null;
+                clearTimeout(rxWhoTimer);
+            }
+        }, { passive: true });
+        el.addEventListener('touchcancel', () => { start = null; clearTimeout(rxWhoTimer); }, { passive: true });
+        el.addEventListener('touchend', e => {
+            clearTimeout(rxWhoTimer);
+            start = null;
+            if (fired) {
+                e.preventDefault();                 // long-press must not toggle the reaction
+                el.dataset.bfcLp = String(Date.now());
+            }
+        }, { passive: false });
+        el.addEventListener('contextmenu', e => e.preventDefault());
+    }
+
+    function rxLongPressed(el) {
+        const t = Number(el.dataset.bfcLp || 0);
+        return Boolean(t) && Date.now() - t < 700;
+    }
+
+    document.addEventListener('touchstart', e => {
+        if (rxWhoEl && rxWhoEl.classList.contains('bfc-open') && !e.target.closest('.bfc-rx-chip, .bfc-qr-btn')) rxWhoHide();
+    }, { capture: true, passive: true });
+    document.addEventListener('scroll', () => { if (rxWhoEl) rxWhoHide(); }, { capture: true, passive: true });
+
     function renderReactions(msgEl) {
         const key = msgEl.dataset.bfcKey;
         let row = msgEl.querySelector(':scope > .bfc-rx-row');
@@ -1381,9 +1527,11 @@
             chip.className = 'bfc-rx-chip' + (group.users.some(u => rxUserIsMe(u, me)) ? ' bfc-rx-mine' : '');
             chip.textContent = `${group.emoji} ${group.count}`;
             chip.title = rxWhoText(group);
+            bindRxLongPress(chip, msgEl, group.emoji);
             chip.addEventListener('click', e => {
                 e.preventDefault();
                 e.stopPropagation();
+                if (rxLongPressed(chip)) return;
                 toggleReaction(msgEl, group.emoji, chip);
             });
             row.appendChild(chip);
@@ -1520,7 +1668,10 @@
         } finally {
             if (btn) btn.classList.remove('bfc-qr-busy');
             const bar = msgEl.querySelector(':scope > .bfc-qr');
-            if (bar) bar.classList.remove('bfc-open');
+            if (bar) {
+                bar.classList.remove('bfc-open');
+                if (qrOpenKeys) qrOpenKeys.delete(key);
+            }
         }
     }
 
@@ -1550,35 +1701,131 @@
             if (existing) existing.remove();
             return;
         }
-        if (existing) return;
+        if (existing) {
+            if (isMobile() && qrOpenKeys.has(msgEl.dataset.bfcKey)) existing.classList.add('bfc-open');
+            return;
+        }
         const bar = document.createElement('div');
-        bar.className = 'bfc-qr';
+        bar.className = 'bfc-qr' + (isMobile() && qrOpenKeys.has(msgEl.dataset.bfcKey) ? ' bfc-open' : '');
         CFG.quickReactions.forEach(emoji => {
             const b = document.createElement('button');
             b.type = 'button';
             b.className = 'bfc-qr-btn';
             b.textContent = emoji;
             b.title = `React ${emoji}`;
+            bindRxLongPress(b, msgEl, emoji);
             b.addEventListener('click', e => {
                 e.preventDefault();
                 e.stopPropagation();
+                if (rxLongPressed(b)) return;
                 toggleReaction(msgEl, emoji, b);
             });
             bar.appendChild(b);
         });
         msgEl.appendChild(bar);
 
-        // Touch devices have no hover: tapping a message toggles its quick-react bar.
-        if (IS_TOUCH && !msgEl.dataset.bfcQrBound) {
+        // Touch devices have no hover: DOUBLE-tapping a message toggles its quick-react bar.
+        // A single tap, scroll, drag or long-press never opens it, so scrolling in PDA is safe.
+        if (isMobile() && !msgEl.dataset.bfcQrBound) {
             msgEl.dataset.bfcQrBound = '1';
-            msgEl.addEventListener('click', e => {
-                if (e.target.closest('a, button, input, textarea, [role="button"], .bfc-qr, .bfc-rx-row')) return;
-                const own = msgEl.querySelector(':scope > .bfc-qr');
-                document.querySelectorAll('.bfc-qr.bfc-open').forEach(q => { if (q !== own) q.classList.remove('bfc-open'); });
-                if (own) own.classList.toggle('bfc-open');
-            });
+            let tStart = null, tMoved = false, lastTap = null;
+            msgEl.addEventListener('touchstart', e => {
+                const t = e.touches[0];
+                tMoved = e.touches.length > 1;
+                tStart = t ? { x: t.clientX, y: t.clientY, time: Date.now() } : null;
+            }, { passive: true });
+            msgEl.addEventListener('touchmove', e => {
+                const t = e.touches[0];
+                if (!tStart || !t) return;
+                if (Math.abs(t.clientX - tStart.x) > 6 || Math.abs(t.clientY - tStart.y) > 6) tMoved = true;
+            }, { passive: true });
+            msgEl.addEventListener('touchend', e => {
+                const start = tStart;
+                tStart = null;
+                if (!start || tMoved) { lastTap = null; return; }
+                if (Date.now() - qrLastScroll < 700) { lastTap = null; return; }
+                if (Date.now() - start.time > 300) { lastTap = null; return; }          // long-press
+                if (e.target.closest('a, button, input, textarea, [role="button"], .bfc-qr, .bfc-rx-row')) { lastTap = null; return; }
+                const now = Date.now();
+                if (lastTap && now - lastTap.time < 350 &&
+                    Math.abs(start.x - lastTap.x) < 30 && Math.abs(start.y - lastTap.y) < 30) {
+                    lastTap = null;
+                    e.preventDefault(); // stop double-tap zoom / word selection
+                    try { window.getSelection().removeAllRanges(); } catch (_) {}
+                    const own = msgEl.querySelector(':scope > .bfc-qr');
+                    document.querySelectorAll('.bfc-qr.bfc-open').forEach(q => {
+                        if (q === own) return;
+                        q.classList.remove('bfc-open');
+                        const host = q.parentElement;
+                        if (host && host.dataset.bfcKey) qrOpenKeys.delete(host.dataset.bfcKey);
+                    });
+                    qrDblAt = Date.now();
+                    if (own) {
+                        const open = own.classList.toggle('bfc-open');
+                        const k = msgEl.dataset.bfcKey;
+                        if (k) { if (open) qrOpenKeys.add(k); else qrOpenKeys.delete(k); }
+                    }
+                } else {
+                    lastTap = { x: start.x, y: start.y, time: now };
+                }
+            }, { passive: false });
         }
     }
+
+    // Close any open quick-react bar when the chat scrolls, and remember when scrolling last happened.
+    let qrLastScroll = 0;
+    // On touch/PDA the bar stays open until the same message is double-tapped again.
+    const qrOpenKeys = new Set();
+    let qrDblAt = 0;
+
+    function closeQuickBars(except) {
+        document.querySelectorAll('.bfc-qr.bfc-open').forEach(q => {
+            if (q === except) return;
+            q.classList.remove('bfc-open');
+            const host = q.parentElement;
+            if (host && host.dataset.bfcKey) qrOpenKeys.delete(host.dataset.bfcKey);
+        });
+    }
+
+    // Touch/PDA: a single tap anywhere (chat box or outside) closes an open quick-react bar.
+    // Scrolling/dragging doesn't count as a tap. A tap on the bar's own message waits briefly so
+    // a double-tap (which toggles that bar itself) isn't fought by this handler.
+    (function bindQuickBarTapAway() {
+        let t0 = null, moved = false;
+        document.addEventListener('touchstart', e => {
+            const t = e.touches[0];
+            moved = e.touches.length > 1;
+            t0 = t ? { x: t.clientX, y: t.clientY, time: Date.now() } : null;
+        }, { capture: true, passive: true });
+        document.addEventListener('touchmove', e => {
+            const t = e.touches[0];
+            if (!t0 || !t) return;
+            if (Math.abs(t.clientX - t0.x) > 8 || Math.abs(t.clientY - t0.y) > 8) moved = true;
+        }, { capture: true, passive: true });
+        document.addEventListener('touchend', e => {
+            const start = t0;
+            t0 = null;
+            if (!isMobile() || !start || moved) return;
+            if (Date.now() - start.time > 450) return;                     // long-press
+            if (!document.querySelector('.bfc-qr.bfc-open')) return;
+            if (e.target.closest && e.target.closest('.bfc-qr, .bfc-rx-row')) return;
+            const host = e.target.closest && e.target.closest('.bfc-msg-container');
+            const own = host ? host.querySelector(':scope > .bfc-qr') : null;
+            closeQuickBars(own && own.classList.contains('bfc-open') ? own : null);
+            if (own && own.classList.contains('bfc-open')) {
+                const tapAt = Date.now();
+                setTimeout(() => {
+                    if (qrDblAt >= tapAt) return;                          // it was a double-tap
+                    closeQuickBars(null);
+                }, 360);
+            }
+        }, { capture: true, passive: true });
+    })();
+    document.addEventListener('scroll', () => {
+        qrLastScroll = Date.now();
+        if (isMobile()) return;
+        document.querySelectorAll('.bfc-qr.bfc-open').forEach(q => q.classList.remove('bfc-open'));
+    }, { capture: true, passive: true });
 
     let tagPopup = null;
 
@@ -1673,7 +1920,15 @@
         statusPill.id = 'bfc-status-pill';
         statusPill.textContent = lastApiError ? 'API Error: ' + lastApiError : CFG.apiKey ? 'Loading…' : 'No API Key';
 
-        left.append(scrollBtn, searchBtn, memberBtn, tagsBtn);
+        const imgBtn = mkBtn('📷 Image');
+        imgBtn.title = 'Upload an image and insert its link';
+        imgBtn.addEventListener('click', () => pickAndUploadImage());
+
+        const gifBtn = mkBtn('🎞 GIF');
+        gifBtn.title = 'Search Klipy and send a GIF';
+        gifBtn.addEventListener('click', () => openGifPicker());
+
+        left.append(scrollBtn, searchBtn, memberBtn, tagsBtn, imgBtn, gifBtn);
         right.append(statusPill);
         toolbar.append(left, right);
         container.appendChild(toolbar);
@@ -1682,7 +1937,12 @@
     function mkBtn(text, cls) {
         const b = document.createElement('button');
         b.className = 'bfc-tb-btn' + (cls ? ' ' + cls : '');
-        b.textContent = text;
+        const parts = String(text).split(' ');
+        if (parts.length > 1) {
+            const ic = document.createElement('span'); ic.className = 'bfc-tb-ic'; ic.textContent = parts.shift();
+            const lb = document.createElement('span'); lb.className = 'bfc-tb-lbl'; lb.textContent = ' ' + parts.join(' ');
+            b.append(ic, lb);
+        } else b.textContent = text;
         return b;
     }
     function updatePill(text, err) {
@@ -1950,12 +2210,621 @@
         }
     }
 
+    // ===== Images: inline previews + upload =====
+    // Paste a shared ImgBB API key here once and nobody has to enter one in settings.
+    const DEFAULT_IMGBB_KEY = '';
+    const imgbbKey = () => (CFG.imgbbKey || DEFAULT_IMGBB_KEY || '').trim();
+    const IMG_EXT_RE = /\.(?:png|jpe?g|gif|webp)(?:[?#].*)?$/i;
+    const IMG_HOSTS = ['i.imgur.com', 'i.ibb.co', 'iili.io', 'i.postimg.cc', 'cdn.discordapp.com', 'media.discordapp.net', 'images.weserv.nl', 'static.klipy.com'];
+    const IMG_URL_RE = /https?:\/\/[^\s<>"']+/gi;
+    const IMG_MAX_PER_MSG = 3;
+
+    function imageUrlAllowed(u) {
+        let url;
+        try { url = new URL(u); } catch (_) { return false; }
+        if (url.protocol !== 'https:') return false;
+        const host = url.hostname.toLowerCase();
+        const isKlipy = host === 'klipy.com' || host.endsWith('.klipy.com');
+        const known = IMG_HOSTS.includes(host) || isKlipy || host === 'torn.com' || host.endsWith('.torn.com');
+        if (!known && !CFG.imageAnyHost) return false;
+        return IMG_EXT_RE.test(url.pathname + url.search) || (known && (host === 'i.imgur.com' || isKlipy));
+    }
+
+    const VIDEO_EXT_RE = /\.(?:mp4|webm)(?:[?#].*)?$/i;
+    function isVideoUrl(u) { try { return VIDEO_EXT_RE.test(new URL(u).pathname); } catch (_) { return false; } }
+
+    function openLightbox(src, video) {
+        const ov = document.createElement('div');
+        ov.className = 'bfc-lightbox';
+        let img;
+        if (video) {
+            img = document.createElement('video');
+            img.muted = true; img.loop = true; img.autoplay = true; img.playsInline = true;
+            img.setAttribute('playsinline', '');
+        } else img = document.createElement('img');
+        img.src = src;
+        ov.appendChild(img);
+        ov.addEventListener('click', () => ov.remove());
+        document.body.appendChild(ov);
+    }
+
+    const failedImgs = new Set();
+    // Remember why the page refused an image (Content-Security-Policy), so we can tell the user.
+    let lastCspBlock = '';
+    document.addEventListener('securitypolicyviolation', e => {
+        if (/img/i.test(e.effectiveDirective || e.violatedDirective || '')) {
+            lastCspBlock = `blocked by Torn page policy (${e.effectiveDirective || e.violatedDirective}): ${e.blockedURI}`;
+        }
+    });
+    const imgDataCache = new Map();
+
+    // ── Animated media manager ────────────────────────────────────────────────
+    // Many animated GIFs/videos playing at once is what lags (and can crash) the page, so
+    // GIFs only animate while they're in view. Out of view, GIFs are swapped for a still frame
+    // (tap to open) and videos are paused; they resume automatically when scrolled back into view.
+    // Offscreen GIFs aren't even downloaded until near the view.
+    const mediaItems = new Set();
+    const mediaByNode = new WeakMap();
+    let mediaIO = null, mediaRaf = 0, mediaTimer = 0;
+
+    function mediaObserver() {
+        if (mediaIO || typeof IntersectionObserver !== 'function') return mediaIO;
+        mediaIO = new IntersectionObserver(entries => {
+            entries.forEach(en => {
+                const it = mediaByNode.get(en.target);
+                if (it) it.visible = en.isIntersecting;
+            });
+            scheduleMediaUpdate();
+        }, { rootMargin: '0px' });
+        return mediaIO;
+    }
+
+    function mediaSetNode(it, node) {
+        const io = mediaObserver();
+        if (io) { try { io.unobserve(it.node); } catch (_) {} }
+        it.node = node;
+        mediaByNode.set(node, it);
+        if (io) io.observe(node); else it.visible = true;
+    }
+
+    function mediaRegister(node, kind, url, img) {
+        const it = { node, kind, url, img: img || null, visible: !mediaObserver(), loaded: kind === 'video', frozen: false };
+        mediaItems.add(it);
+        mediaByNode.set(node, it);
+        const io = mediaObserver();
+        if (io) io.observe(node);
+        return it;
+    }
+
+    function scheduleMediaUpdate() {
+        if (mediaRaf || mediaTimer) return;
+        mediaTimer = setTimeout(() => {
+            mediaTimer = 0;
+            mediaRaf = requestAnimationFrame(() => { mediaRaf = 0; updateMedia(); });
+        }, 120);
+    }
+
+    function freezeGif(it) {
+        const img = it.img;
+        if (!img || it.frozen || !img.isConnected || !img.naturalWidth) return;
+        const rect = img.getBoundingClientRect();
+        const dw = Math.max(1, Math.round(rect.width || img.naturalWidth));
+        const dh = Math.max(1, Math.round(rect.height || img.naturalHeight));
+        const scale = Math.min(1, 400 / Math.max(dw, dh));
+        const c = document.createElement('canvas');
+        c.width = Math.max(1, Math.round(dw * scale));
+        c.height = Math.max(1, Math.round(dh * scale));
+        try {
+            const ctx = c.getContext('2d');
+            ctx.drawImage(img, 0, 0, c.width, c.height);
+            // small play badge so it's obvious it's a paused GIF
+            const r = Math.max(10, Math.min(c.width, c.height) * 0.14);
+            ctx.fillStyle = 'rgba(0,0,0,.55)';
+            ctx.beginPath(); ctx.arc(c.width / 2, c.height / 2, r, 0, Math.PI * 2); ctx.fill();
+            ctx.fillStyle = '#fff';
+            ctx.beginPath();
+            ctx.moveTo(c.width / 2 - r * 0.3, c.height / 2 - r * 0.5);
+            ctx.lineTo(c.width / 2 + r * 0.55, c.height / 2);
+            ctx.lineTo(c.width / 2 - r * 0.3, c.height / 2 + r * 0.5);
+            ctx.closePath(); ctx.fill();
+        } catch (_) { return; }
+        c.className = 'bfc-img bfc-frozen';
+        c.style.width = dw + 'px';
+        c.style.height = dh + 'px';
+        c.title = 'Paused GIF — tap to view';
+        c.addEventListener('click', e => { e.stopPropagation(); openLightbox(it.url); });
+        img.replaceWith(c);
+        it.frozen = true;
+        mediaSetNode(it, c);
+    }
+
+    function unfreezeGif(it) {
+        if (!it.frozen || !it.img) return;
+        const c = it.node;
+        it.frozen = false;
+        if (c && c.isConnected) c.replaceWith(it.img);
+        mediaSetNode(it, it.img);
+    }
+
+    function updateMedia() {
+        const hidden = document.hidden;
+        for (const it of Array.from(mediaItems)) {
+            if (!it.node.isConnected) {
+                if (mediaIO) { try { mediaIO.unobserve(it.node); } catch (_) {} }
+                mediaItems.delete(it);
+            }
+        }
+        // In view = play, out of view = pause/freeze.
+        const allowed = new Set(Array.from(mediaItems).filter(it => it.visible && it.loaded && !hidden));
+        mediaItems.forEach(it => {
+            const play = allowed.has(it);
+            if (it.kind === 'video') {
+                if (play) { if (it.node.paused) it.node.play().catch(() => {}); }
+                else if (!it.node.paused) it.node.pause();
+            } else if (play) {
+                unfreezeGif(it);
+            } else if (it.loaded) {
+                freezeGif(it);
+            }
+        });
+    }
+
+    document.addEventListener('visibilitychange', scheduleMediaUpdate);
+
+    function renderImages(msgEl) {
+        if (!CFG.imagePreviews) return;
+        const bodyEl = findBodyEl(msgEl) || msgEl;
+        const text = messageText(bodyEl, msgEl, true) + ' ' +
+            Array.from(bodyEl.querySelectorAll('a[href]')).map(a => a.href).join(' ');
+        const urls = [];
+        (text.match(IMG_URL_RE) || []).forEach(u => {
+            u = u.replace(/[),.;!?]+$/, '');
+            if (!urls.includes(u) && !failedImgs.has(u) && imageUrlAllowed(u)) urls.push(u);
+        });
+        const sig = urls.slice(0, IMG_MAX_PER_MSG).join('|');
+        const old = msgEl.querySelector(':scope > .bfc-img-wrap');
+        if (!sig) { if (old) old.remove(); return; }
+        if (old && old.dataset.sig === sig) return;
+        if (old) old.remove();
+        const wrap = document.createElement('div');
+        wrap.className = 'bfc-img-wrap';
+        wrap.dataset.sig = sig;
+        urls.slice(0, IMG_MAX_PER_MSG).forEach(u => {
+            if (isVideoUrl(u)) {
+                // Klipy serves some GIFs as looping MP4s: show them as a muted autoplay video.
+                const v = document.createElement('video');
+                v.className = 'bfc-img';
+                v.muted = true; v.loop = true; v.autoplay = false; v.playsInline = true;
+                v.setAttribute('playsinline', ''); v.setAttribute('muted', '');
+                v.preload = 'metadata';          // playback is started/stopped by the media manager
+                mediaRegister(v, 'video', u);
+                const vGiveUp = () => {
+                    failedImgs.add(u);
+                    updatePill('Video not shown: ' + (lastCspBlock || 'failed to load ' + (() => { try { return new URL(u).hostname; } catch (_) { return 'video'; } })()), true);
+                    v.remove();
+                    if (!wrap.querySelector('img, video')) wrap.remove();
+                };
+                let triedBlob = false;
+                v.addEventListener('error', () => {
+                    if (triedBlob || typeof GM_xmlhttpRequest !== 'function') { vGiveUp(); return; }
+                    triedBlob = true;
+                    GM_xmlhttpRequest({
+                        method: 'GET', url: u, responseType: 'blob', timeout: 30000,
+                        onload: r => {
+                            const blob = r.response;
+                            if (!(blob instanceof Blob) || !blob.size) { vGiveUp(); return; }
+                            v.src = URL.createObjectURL(new Blob([blob], { type: 'video/mp4' }));
+                            scheduleMediaUpdate();
+                        },
+                        onerror: vGiveUp, ontimeout: vGiveUp,
+                    });
+                });
+                v.addEventListener('click', e => { e.stopPropagation(); openLightbox(u, true); });
+                if (autoScrollOn && msgListEl) v.addEventListener('loadeddata', () => { msgListEl.scrollTop = msgListEl.scrollHeight; }, { once: true });
+                v.src = u;
+                wrap.appendChild(v);
+                scheduleMediaUpdate();
+                return;
+            }
+            const img = document.createElement('img');
+            img.className = 'bfc-img';
+            img.alt = '';
+            img.decoding = 'async';
+            img.loading = 'lazy';             // offscreen images aren't fetched until near the view
+            let animItem = null;
+            try {
+                const pu = new URL(u);
+                if (/\.(?:gif|webp)$/i.test(pu.pathname) || /(^|\.)klipy\.com$/i.test(pu.hostname)) {
+                    animItem = mediaRegister(img, 'gif', u, img);
+                    img.addEventListener('load', () => { animItem.loaded = true; scheduleMediaUpdate(); });
+                }
+            } catch (_) {}
+            const giveUp = () => {
+                failedImgs.add(u);               // never retry: this is what stopped the blinking
+                updatePill('Image not shown: ' + (lastCspBlock || 'failed to load ' + (() => { try { return new URL(u).hostname; } catch (_) { return 'image'; } })()), true);
+                img.remove();
+                if (!wrap.querySelector('img, video')) wrap.remove();
+            };
+            let triedData = false;
+            img.addEventListener('error', () => {
+                // The page may block this host for <img>; fetch it through the userscript and show it as a data URL.
+                if (triedData || typeof GM_xmlhttpRequest !== 'function') { giveUp(); return; }
+                triedData = true;
+                GM_xmlhttpRequest({
+                    method: 'GET', url: u, responseType: 'blob', timeout: 20000,
+                    onload: r => {
+                        const blob = r.response;
+                        if (!(blob instanceof Blob) || !blob.size) { giveUp(); return; }
+                        const fr = new FileReader();
+                        fr.onload = () => { imgDataCache.set(u, fr.result); img.src = fr.result; };
+                        fr.onerror = giveUp;
+                        fr.readAsDataURL(blob);
+                    },
+                    onerror: giveUp, ontimeout: giveUp,
+                });
+            });
+            img.src = imgDataCache.get(u) || u;
+            img.addEventListener('click', e => { e.stopPropagation(); openLightbox(u); });
+            wrap.appendChild(img);
+        });
+        msgEl.appendChild(wrap);
+        if (autoScrollOn && msgListEl) {
+            wrap.querySelectorAll('img').forEach(i => i.addEventListener('load', () => { msgListEl.scrollTop = msgListEl.scrollHeight; }, { once: true }));
+        }
+    }
+
+    function fileToResizedBase64(file, maxDim, quality) {
+        return new Promise((resolve, reject) => {
+            const url = URL.createObjectURL(file);
+            const im = new Image();
+            im.onload = () => {
+                const scale = Math.min(1, maxDim / Math.max(im.width, im.height));
+                const c = document.createElement('canvas');
+                c.width = Math.max(1, Math.round(im.width * scale));
+                c.height = Math.max(1, Math.round(im.height * scale));
+                c.getContext('2d').drawImage(im, 0, 0, c.width, c.height);
+                URL.revokeObjectURL(url);
+                resolve(c.toDataURL('image/jpeg', quality || 0.8).split(',')[1]);
+            };
+            im.onerror = () => { URL.revokeObjectURL(url); reject(new Error('could not read image')); };
+            im.src = url;
+        });
+    }
+
+    // Shared POST helper: Tampermonkey, Torn PDA or plain fetch.
+    async function postForm(url, data, timeoutMs) {
+        const headers = { 'Content-Type': 'application/x-www-form-urlencoded' };
+        if (typeof GM_xmlhttpRequest === 'function') {
+            return new Promise((resolve, reject) => {
+                GM_xmlhttpRequest({
+                    method: 'POST', url, data, headers, timeout: timeoutMs,
+                    onload: r => resolve({ status: r.status, text: r.responseText }),
+                    onerror: () => reject(new Error('network error')),
+                    ontimeout: () => reject(new Error('upload timed out')),
+                });
+            });
+        }
+        const timed = p => new Promise((resolve, reject) => {
+            const t = setTimeout(() => reject(new Error('upload timed out')), timeoutMs);
+            Promise.resolve(p).then(v => { clearTimeout(t); resolve(v); }, e => { clearTimeout(t); reject(e); });
+        });
+        if (typeof PDA_httpPost === 'function') {
+            const r = await timed(PDA_httpPost(url, headers, data));
+            return { status: Number(r.status), text: r.responseText };
+        }
+        const r = await timed(fetch(url, { method: 'POST', headers, body: data }));
+        return { status: r.status, text: await r.text() };
+    }
+
+    const FREEIMAGE_KEY = '6d207e02198a847aa98d0a2a901485a5'; // public key published on freeimage.host/api
+
+    async function uploadVia(host, base64) {
+        const enc = encodeURIComponent(base64);
+        let url, body, getLink;
+        if (host === 'imgbb') {
+            const key = imgbbKey();
+            if (!key) throw new Error('no ImgBB key set');
+            url = 'https://api.imgbb.com/1/upload?key=' + encodeURIComponent(key);
+            body = 'image=' + enc;
+            getLink = j => j && j.data && (j.data.url || j.data.display_url);
+        } else {
+            url = 'https://freeimage.host/api/1/upload';
+            body = `key=${FREEIMAGE_KEY}&action=upload&format=json&source=${enc}`;
+            getLink = j => j && j.image && (j.image.url || j.image.display_url);
+        }
+        const r = await postForm(url, body, body.length > 1500000 ? 90000 : 40000);
+        let j = null; try { j = JSON.parse(r.text); } catch (_) {}
+        const link = getLink(j);
+        if (r.status < 200 || r.status >= 300 || !link) {
+            const msg = j && (j.error && (j.error.message || j.error) || j.status_txt);
+            throw new Error(`${host}: ${msg || 'HTTP ' + r.status}`);
+        }
+        return link;
+    }
+
+    function fileToRawBase64(file) {
+        return new Promise((resolve, reject) => {
+            const fr = new FileReader();
+            fr.onload = () => resolve(String(fr.result).split(',')[1] || '');
+            fr.onerror = () => reject(new Error('could not read file'));
+            fr.readAsDataURL(file);
+        });
+    }
+
+    const GIF_MAX_BYTES = 8 * 1024 * 1024;
+
+    // Tries the chosen host first, then the other one (if usable).
+    async function uploadImage(file) {
+        const isGif = file.type === 'image/gif' || /\.gif$/i.test(file.name || '');
+        if (isGif && file.size > GIF_MAX_BYTES) throw new Error('GIF too large (max 8 MB)');
+        const pref = CFG.imageHost === 'imgbb' ? 'imgbb' : 'freeimage';
+        const order = [pref, pref === 'imgbb' ? 'freeimage' : 'imgbb'].filter(h => h !== 'imgbb' || imgbbKey());
+        const errors = [];
+        for (let n = 0; n < order.length; n++) {
+            try {
+                // GIFs are sent untouched so they stay animated; other images are shrunk first.
+                const b64 = isGif ? await fileToRawBase64(file)
+                                  : await fileToResizedBase64(file, n === 0 ? 1280 : 800, n === 0 ? 0.8 : 0.7);
+                if (n > 0) updatePill('Retrying with ' + order[n] + '…');
+                return await uploadVia(order[n], b64);
+            } catch (e) { errors.push(e.message); }
+        }
+        throw new Error(errors.join(' / '));
+    }
+
+    function pickAndUploadImage() {
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.accept = 'image/*';
+        input.style.display = 'none';
+        input.addEventListener('change', async () => {
+            const file = input.files && input.files[0];
+            input.remove();
+            if (!file) return;
+            try {
+                updatePill('Uploading image…');
+                const link = await uploadImage(file);
+                if (CFG.imageAutoSend) {
+                    if (sendChatMessage(link)) updatePill('Image sent ✓');
+                    else updatePill('Open faction chat first', true);
+                } else if (insertTextIntoChat(link)) {
+                    updatePill('Image link added — press send');
+                }
+            } catch (e) {
+                updatePill('Upload failed: ' + e.message, true);
+            }
+        });
+        document.body.appendChild(input);
+        input.click();
+    }
+
+    // ===== GIF picker (Klipy) =====
+    const KLIPY_API = 'https://api.klipy.com/api/v1/';
+    const KLIPY_PER_PAGE = 24;
+    // Shared Klipy API key: everyone running this script uses it, so nobody has to register their own.
+    // A key typed into BFC settings overrides it.
+    const DEFAULT_KLIPY_KEY = 'upW8GxxHX1sWYVNmE9ayB5s4VieWGpFlO3ywLWkjAr2Fbmw3LNhvofePdqbqFgHl';
+    const klipyKey = () => (CFG.klipyKey || DEFAULT_KLIPY_KEY || '').trim();
+    let gifPickerEl = null;
+
+    function klipyCustomerId() {
+        if (CFG.userId) return String(CFG.userId);
+        if (!CFG.klipyCid) { CFG.klipyCid = 'bfc' + Math.random().toString(36).slice(2, 12); saveCfg(CFG); }
+        return CFG.klipyCid;
+    }
+
+    // GET helper: Tampermonkey, Torn PDA or plain fetch.
+    async function httpGet(url, timeoutMs) {
+        const headers = { Accept: 'application/json' };
+        if (typeof GM_xmlhttpRequest === 'function') {
+            return new Promise((resolve, reject) => {
+                GM_xmlhttpRequest({
+                    method: 'GET', url, headers, timeout: timeoutMs,
+                    onload: r => resolve({ status: r.status, text: r.responseText }),
+                    onerror: () => reject(new Error('network error')),
+                    ontimeout: () => reject(new Error('request timed out')),
+                });
+            });
+        }
+        const timed = p => new Promise((resolve, reject) => {
+            const t = setTimeout(() => reject(new Error('request timed out')), timeoutMs);
+            Promise.resolve(p).then(v => { clearTimeout(t); resolve(v); }, e => { clearTimeout(t); reject(e); });
+        });
+        if (typeof PDA_httpGet === 'function') {
+            const r = await timed(PDA_httpGet(url, headers));
+            return { status: Number(r.status), text: r.responseText };
+        }
+        const r = await timed(fetch(url, { headers }));
+        return { status: r.status, text: await r.text() };
+    }
+
+    function klipyItem(it) {
+        const f = it && it.file;
+        if (!f) return null;
+        const pick = (...sizes) => {
+            for (const sz of sizes) { const u = f[sz] && f[sz].gif && f[sz].gif.url; if (u) return u; }
+            return (f.gif && f.gif.url) || '';
+        };
+        const send = pick('md', 'sm', 'hd', 'xs');
+        const thumb = pick('sm', 'xs', 'md') || (f.xs && f.xs.jpg && f.xs.jpg.url) || send;
+        if (!send || !/^https:\/\/([a-z0-9-]+\.)?klipy\.com\//i.test(send)) return null;
+        return { id: String(it.id || it.slug || send), title: String(it.title || 'GIF'), send, thumb };
+    }
+
+    async function klipyFetch(q, page) {
+        const key = klipyKey();
+        const params = new URLSearchParams({ page: String(page), per_page: String(KLIPY_PER_PAGE), customer_id: klipyCustomerId(), format_filter: 'gif,jpg' });
+        if (q) params.set('q', q);
+        const url = KLIPY_API + encodeURIComponent(key) + '/gifs/' + (q ? 'search' : 'trending') + '?' + params.toString();
+        const r = await httpGet(url, 20000);
+        let j = null; try { j = JSON.parse(r.text); } catch (_) {}
+        if (r.status === 401 || r.status === 403) throw new Error('Klipy rejected the API key');
+        if (r.status < 200 || r.status >= 300 || !j) throw new Error('Klipy error (HTTP ' + r.status + ')');
+        const d = j.data;
+        const list = Array.isArray(d) ? d : (d && Array.isArray(d.data) ? d.data : []);
+        const hasNext = !!(d && !Array.isArray(d) && d.has_next);
+        return { items: list.map(klipyItem).filter(Boolean), hasNext };
+    }
+
+    // Loads a thumbnail; if Torn's page policy blocks it, fetches it via the userscript instead.
+    function loadGifThumb(img, u) {
+        let tried = false;
+        img.addEventListener('error', () => {
+            if (tried || typeof GM_xmlhttpRequest !== 'function') return;
+            tried = true;
+            GM_xmlhttpRequest({
+                method: 'GET', url: u, responseType: 'blob', timeout: 20000,
+                onload: r => {
+                    const b = r.response;
+                    if (!(b instanceof Blob) || !b.size) return;
+                    const fr = new FileReader();
+                    fr.onload = () => { img.src = fr.result; };
+                    fr.readAsDataURL(b);
+                },
+            });
+        });
+        img.src = u;
+    }
+
+    function closeGifPicker() {
+        if (gifPickerEl) { gifPickerEl.remove(); gifPickerEl = null; }
+        document.removeEventListener('keydown', gifPickerKey, true);
+    }
+    function gifPickerKey(e) { if (e.key === 'Escape') { e.stopPropagation(); closeGifPicker(); } }
+
+    function sendGifLink(link) {
+        if (CFG.imageAutoSend) {
+            if (sendChatMessage(link)) updatePill('GIF sent ✓');
+            else updatePill('Open faction chat first', true);
+        } else if (insertTextIntoChat(link)) {
+            updatePill('GIF link added — press send');
+        }
+    }
+
+    function openGifPicker() {
+        if (gifPickerEl) { closeGifPicker(); return; }
+        if (!klipyKey()) {
+            updatePill('Add a Klipy API key in BFC settings (⚙) first', true);
+            return;
+        }
+        const bd = document.createElement('div');
+        bd.id = 'bfc-gif-bd';
+        bd.innerHTML =
+            '<div id="bfc-gif-pk">' +
+              '<div id="bfc-gif-hd"><input id="bfc-gif-q" type="text" placeholder="Search GIFs…" autocomplete="off"><button id="bfc-gif-x" type="button" title="Close">✕</button></div>' +
+              '<div id="bfc-gif-grid"></div>' +
+              '<div id="bfc-gif-ft">Powered by KLIPY</div>' +
+            '</div>';
+        document.body.appendChild(bd);
+        gifPickerEl = bd;
+        document.addEventListener('keydown', gifPickerKey, true);
+        bd.addEventListener('click', e => { if (e.target === bd) closeGifPicker(); });
+        bd.querySelector('#bfc-gif-x').addEventListener('click', closeGifPicker);
+
+        const qEl = bd.querySelector('#bfc-gif-q');
+        const grid = bd.querySelector('#bfc-gif-grid');
+        let query = '', page = 1, token = 0, timer = null;
+
+        const note = text => {
+            let m = grid.querySelector('#bfc-gif-msg');
+            if (!m) { m = document.createElement('div'); m.id = 'bfc-gif-msg'; grid.appendChild(m); }
+            m.textContent = text;
+        };
+
+        async function load(reset) {
+            const my = ++token;
+            if (reset) { page = 1; grid.textContent = ''; }
+            grid.querySelector('#bfc-gif-more')?.remove();
+            note('Loading…');
+            try {
+                const { items, hasNext } = await klipyFetch(query, page);
+                if (my !== token || !gifPickerEl) return;
+                grid.querySelector('#bfc-gif-msg')?.remove();
+                if (!items.length && page === 1) { note('No GIFs found'); return; }
+                items.forEach(g => {
+                    const b = document.createElement('button');
+                    b.type = 'button';
+                    b.className = 'bfc-gif-it';
+                    b.title = g.title;
+                    const im = document.createElement('img');
+                    im.alt = g.title;
+                    im.loading = 'lazy';
+                    loadGifThumb(im, g.thumb);
+                    b.appendChild(im);
+                    b.addEventListener('click', () => { closeGifPicker(); sendGifLink(g.send); });
+                    grid.appendChild(b);
+                });
+                if (hasNext) {
+                    const more = document.createElement('button');
+                    more.id = 'bfc-gif-more';
+                    more.type = 'button';
+                    more.textContent = 'Load more';
+                    more.addEventListener('click', () => { page++; load(false); });
+                    grid.appendChild(more);
+                }
+            } catch (e) {
+                if (my !== token || !gifPickerEl) return;
+                note('✗ ' + e.message);
+            }
+        }
+
+        qEl.addEventListener('input', () => {
+            clearTimeout(timer);
+            timer = setTimeout(() => { query = qEl.value.trim(); load(true); }, 400);
+        });
+        qEl.addEventListener('keydown', e => {
+            if (e.key === 'Enter') { clearTimeout(timer); query = qEl.value.trim(); load(true); }
+        });
+        load(true);          // trending to start
+        setTimeout(() => qEl.focus(), 50);
+    }
+
+    // Posts `text` as its own chat message. The user's half-typed draft is kept and restored.
+    function sendChatMessage(text) {
+        const input = chatBoxEl && chatBoxEl.querySelector('textarea');
+        if (!input) return false;
+        const setVal = v => {
+            const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set;
+            if (setter) setter.call(input, v); else input.value = v;
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+        };
+        const draft = input.value || '';
+        setVal(text);
+        input.focus();
+
+        // 1) Prefer the chat's own send button (the paper-plane next to the box).
+        const scope = input.closest('[class*="chat-box"], [class*="chat_box"], [class*="root"]') || chatBoxEl;
+        const btns = Array.from((scope || chatBoxEl).querySelectorAll('button, [role="button"]'))
+            .filter(b => !b.closest('#bfc-toolbar') && !b.closest('.bfc-msg-container') && !b.disabled);
+        const labelOf = b => `${b.getAttribute('aria-label') || ''} ${b.title || ''} ${b.className || ''}`.toLowerCase();
+        let sendBtn = btns.find(b => /send|submit|plane/.test(labelOf(b)));
+        if (!sendBtn) {
+            // fall back to the closest button that follows the textarea in the DOM
+            sendBtn = btns.find(b => input.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING && b.querySelector('svg'));
+        }
+        let sent = false;
+        if (sendBtn) { sendBtn.click(); sent = true; }
+        else {
+            // 2) Otherwise simulate pressing Enter.
+            const opts = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true };
+            input.dispatchEvent(new KeyboardEvent('keydown', opts));
+            input.dispatchEvent(new KeyboardEvent('keypress', opts));
+            input.dispatchEvent(new KeyboardEvent('keyup', opts));
+            sent = true;
+        }
+        // Restore whatever the user had typed (after the send has been processed).
+        setTimeout(() => { if (!input.value || input.value === text) setVal(draft); }, 400);
+        return sent;
+    }
+
+
     // Returns true the first time an element is processed.
     function processMsg(msgEl) {
         if (msgEl.dataset.bfcDone) {
             assignMsgKey(msgEl);
             decorateMsg(msgEl);
             renderReactions(msgEl);
+            renderImages(msgEl);
             return false;
         }
         msgEl.dataset.bfcDone = '1';
@@ -1980,6 +2849,7 @@
         const fullText = messageText(msgEl, msgEl, true);
         checkMention(msgEl, fp, isNew, fullText);
         renderReactions(msgEl);
+        renderImages(msgEl);
 
         const bodyText = messageText(bodyEl || msgEl, msgEl, true).toLowerCase();
         processedMsgs.push({ el: msgEl, bodyText, fullText: fullText.toLowerCase() });
@@ -2239,7 +3109,7 @@
         return null;
     }
 
-    const SCAN_INTERVAL_MS = IS_TORN_PDA ? 1000 : 1500;
+    const SCAN_INTERVAL_MS = isMobile() ? 1000 : 1500;
     let lastAttachAt = 0, attachQueued = false;
 
     function attachToFactionChat() {
@@ -2360,7 +3230,15 @@
                 <span id="bfc-pver">v${BFC_VERSION}</span><button id="bfc-panel-close" type="button" aria-label="Close settings" style="background:transparent;border:0;color:#8b949e;font-size:20px;cursor:pointer;padding:0 2px">×</button>
             </div>
             <div id="bfc-pb">
-                <div class="bfc-mention-note" style="margin-top:0">${IS_TORN_PDA ? "📱 Torn PDA / touch mode active" : "🖥 Desktop mode active"}</div>
+                <div class="bfc-mention-note" style="margin-top:0">${isMobile() ? "📱 Mobile mode active" : "🖥 Desktop mode active"}${CFG.uiMode === 'auto' ? ' (auto-detected)' : ' (forced)'}</div>
+                <div class="bfc-fld">
+                    <label class="bfc-lbl">Interface mode</label>
+                    <select class="bfc-inp" id="s-uimode">
+                        <option value="auto"${CFG.uiMode==='auto'?' selected':''}>Auto (detect device)</option>
+                        <option value="mobile"${CFG.uiMode==='mobile'?' selected':''}>Mobile (touch layout)</option>
+                        <option value="desktop"${CFG.uiMode==='desktop'?' selected':''}>Desktop (mouse layout)</option>
+                    </select>
+                </div>
                 <span class="bfc-slbl">API Connection</span>
                 <div class="bfc-fld">
                     <label class="bfc-lbl">Torn API Key (Limited Access)</label>
@@ -2405,12 +3283,42 @@
                     <span>🔔 Notify when someone reacts to my message</span>
                     <label class="bfc-sw"><input type="checkbox" id="s-rxn"${CFG.reactionNotify?' checked':''}><span class="bfc-swt"></span></label>
                 </div>
+                <hr class="bfc-div">
+                <span class="bfc-slbl">Images</span>
+                <div class="bfc-row">
+                    <span>🖼 Show image previews in chat</span>
+                    <label class="bfc-sw"><input type="checkbox" id="s-imgon"${CFG.imagePreviews?' checked':''}><span class="bfc-swt"></span></label>
+                </div>
+                <div class="bfc-row">
+                    <span>📤 Auto-send image after upload</span>
+                    <label class="bfc-sw"><input type="checkbox" id="s-imgsend"${CFG.imageAutoSend?' checked':''}><span class="bfc-swt"></span></label>
+                </div>
+                <div class="bfc-row">
+                    <span>🌐 Allow images from any website</span>
+                    <label class="bfc-sw"><input type="checkbox" id="s-imgany"${CFG.imageAnyHost?' checked':''}><span class="bfc-swt"></span></label>
+                </div>
+                <p class="bfc-mention-note">Off = only FreeImage.host, ImgBB, Imgur, PostImages, Klipy, Discord and Torn images load. Any-site lets the poster see your IP address.</p>
+                <div class="bfc-fld">
+                    <label class="bfc-lbl">Upload host for the 📷 button</label>
+                    <select class="bfc-inp" id="s-imghost">
+                        <option value="freeimage"${CFG.imageHost!=='imgbb'?' selected':''}>FreeImage.host (no key needed)</option>
+                        <option value="imgbb"${CFG.imageHost==='imgbb'?' selected':''}>ImgBB (needs API key)</option>
+                    </select>
+                </div>
+                <div class="bfc-fld">
+                    <label class="bfc-lbl">ImgBB API key (optional, only for ImgBB)</label>
+                    <input class="bfc-inp" type="text" id="s-imgur" placeholder="free key from api.imgbb.com" value="${esc(CFG.imgbbKey || '')}">
+                </div>
+                <div class="bfc-fld">
+                    <label class="bfc-lbl">Klipy API key (optional — a shared key is built in)</label>
+                    <input class="bfc-inp" type="text" id="s-klipy" placeholder="leave blank to use the built-in key" value="${esc(CFG.klipyKey || '')}">
+                </div>
                 <div class="bfc-fld">
                     <label class="bfc-lbl">Reaction server URL (blank = auto-detect Torn-Intel)</label>
                     <input class="bfc-inp" type="text" id="s-rxurl" placeholder="auto" value="${esc(CFG.reactionServer || '')}">
                 </div>
                 <button type="button" class="bfc-tb-btn" id="bfc-rx-test" style="width:100%;margin-top:4px;">🔌 Test reaction server</button>
-                <p class="bfc-mention-note" id="bfc-rx-status">Torn chat has no reactions of its own, so BFC syncs them through the Torn-Intel server. Only members running BFC see them. ${IS_TORN_PDA ? 'Tap a message to show its quick-react bar' : 'Hover a message to show its quick-react bar'}; click a reaction chip to add/remove yours, and ${IS_TORN_PDA ? 'long-press' : 'hover'} it to see who reacted.</p>
+                <p class="bfc-mention-note" id="bfc-rx-status">Torn chat has no reactions of its own, so BFC syncs them through the Torn-Intel server. Only members running BFC see them. ${isMobile() ? 'Double-tap a message to show its quick-react bar' : 'Hover a message to show its quick-react bar'}; click a reaction chip to add/remove yours, and ${isMobile() ? 'long-press' : 'hover'} it to see who reacted.</p>
 
                 <hr class="bfc-div">
                 <span class="bfc-slbl">Officer Group</span>
@@ -2532,17 +3440,26 @@
             CFG.showRankIcons   = document.getElementById('s-rank').checked;
             CFG.autoScroll      = document.getElementById('s-asc').checked;
             CFG.hideGearBtn     = document.getElementById('s-hide').checked;
+            const prevMode = CFG.uiMode;
+            const modeSel = document.getElementById('s-uimode');
+            CFG.uiMode = modeSel && UI_MODES.includes(modeSel.value) ? modeSel.value : 'auto';
             CFG.replyButton     = document.getElementById('s-reply').checked;
             CFG.quickReactEnabled = document.getElementById('s-qr').checked;
             CFG.quickReactions  = parseQuickReactions(document.getElementById('s-qre').value, DEFAULTS.quickReactions);
             CFG.reactionNotify  = document.getElementById('s-rxn').checked;
             CFG.reactionsEnabled = document.getElementById('s-rxon').checked;
+            CFG.imagePreviews   = document.getElementById('s-imgon').checked;
+            CFG.imageAnyHost    = document.getElementById('s-imgany').checked;
+            CFG.imageAutoSend   = document.getElementById('s-imgsend').checked;
+            CFG.imageHost       = document.getElementById('s-imghost').value === 'imgbb' ? 'imgbb' : 'freeimage';
+            CFG.imgbbKey        = document.getElementById('s-imgur').value.trim();
+            CFG.klipyKey        = document.getElementById('s-klipy').value.trim();
             const rxServer = trimSlash(document.getElementById('s-rxurl').value);
             if (rxServer !== CFG.reactionServer) { rx.base = ''; rx.failures = 0; rx.retryAt = 0; }
             CFG.reactionServer  = rxServer;
             document.getElementById('s-qre').value = CFG.quickReactions.join(' ');
             document.querySelectorAll('.bfc-qr').forEach(n => n.remove());
-            document.querySelectorAll('.bfc-msg-container').forEach(el => { injectCopy(el); injectQuickReact(el); renderReactions(el); });
+            document.querySelectorAll('.bfc-msg-container').forEach(el => { injectCopy(el); injectQuickReact(el); renderReactions(el); renderImages(el); });
             if (CFG.reactionsEnabled) rxFetch(false);
             CFG.officerIds       = Array.from(officerDraftIds);
             CFG.statusColors.online  = document.getElementById('s-con').value;
@@ -2558,6 +3475,11 @@
             if (CFG.hideGearBtn) panel.classList.remove('bfc-open');
             startPoll();
             chatBoxEl = null;
+            if (CFG.uiMode !== prevMode) {
+                setMsg('✓ Saved! Reloading to apply interface mode…', true);
+                setTimeout(() => location.reload(), 900);
+                return;
+            }
             if (!CFG.hideGearBtn) setMsg('✓ Saved! Chat will refresh shortly.', true);
         });
 
@@ -2608,7 +3530,7 @@
 
         try {
             showStartupIndicator(`BFC v${BFC_VERSION} loaded`);
-            if (IS_TORN_PDA) document.body.classList.add('bfc-pda');
+            if (isMobile()) document.body.classList.add('bfc-pda');
         if (CFG.apiKey) fetchMyUsername();
         buildSettingsPanel();
         runScanner();
@@ -2624,7 +3546,7 @@
         window.addEventListener('orientationchange', () => setTimeout(attachToFactionChat, 250));
         window.addEventListener('resize', () => {
             const panel = document.getElementById('bfc-panel');
-            if (panel && IS_TORN_PDA) panel.style.maxHeight = Math.max(320, window.innerHeight * 0.82) + 'px';
+            if (panel && isMobile()) panel.style.maxHeight = Math.max(320, window.innerHeight * 0.82) + 'px';
         });
 
             console.log(`[BFC] v${BFC_VERSION} desktop/PDA build loaded ✓`);
