@@ -25,8 +25,8 @@
 // @connect      *
 // @run-at       document-start
 // @license      MIT
-// @updateURL    https://raw.githubusercontent.com/xDp64xG/Torn-Intel/main/scripts/tampermonkey/better-faction-chat.user.js
-// @downloadURL  https://raw.githubusercontent.com/xDp64xG/Torn-Intel/main/scripts/tampermonkey/better-faction-chat.user.js
+// @updateURL    https://raw.githubusercontent.com/Bagobo101/Torn-Intel-by-Jeff/refs/heads/main/scripts/tampermonkey/better-faction-chat.user.js
+// @downloadURL  https://raw.githubusercontent.com/Bagobo101/Torn-Intel-by-Jeff/refs/heads/main/scripts/tampermonkey/better-faction-chat.user.js
 // ==/UserScript==
 
 (function () {
