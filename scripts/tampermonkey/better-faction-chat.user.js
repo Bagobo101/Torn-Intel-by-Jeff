@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Better Faction Chat – Torn.com (Desktop + Torn PDA)
 // @namespace    https://torn.com/
-// @version      2.9.0
+// @version      2.13.1
 // @description  Desktop and Torn PDA faction chat tools: status, group tags, officer groups, search, timestamps, reactions, image uploads, GIFs and touch-friendly controls
 // @author       sercann
 // @match        https://www.torn.com/*
@@ -16,6 +16,9 @@
 // @connect      static.klipy.com
 // @connect      freeimage.host
 // @connect      api.imgbb.com
+// @connect      prnt.sc
+// @connect      prntscr.com
+// @connect      image.prntscr.com
 // @connect      trycloudflare.com
 // @connect      127.0.0.1
 // @connect      localhost
@@ -28,8 +31,10 @@
 
 (function () {
     'use strict';
+    // The thread mini-browser loads a Torn page in an iframe; don't start a second copy of BFC in it.
+    try { if (window.top !== window.self) return; } catch (_) { return; }
 
-    const BFC_VERSION = '2.9.0';
+    const BFC_VERSION = '2.13.1';
     const STORE_KEY   = 'bfc_settings_v2';
     const API_BASE    = 'https://api.torn.com';
     const PDA_KEY     = '###PDA-APIKEY###';
@@ -222,6 +227,14 @@
         .bfc-tb-btn:hover { background:#3d3d3d; color:#fff; border-color:#555; }
         .bfc-tb-on { color:${CFG.statusColors.online}!important; border-color:${CFG.statusColors.online}40!important; background:rgba(0,230,118,.1)!important; }
         #bfc-status-pill { font-size:11px; color:#888; white-space:nowrap; padding:2px 6px; background:#111; border-radius:4px; border:1px solid #2a2a2a; }
+        /* Desktop (PC) only: toolbar buttons are 135% of their base size. Mobile/PDA keeps its own sizes. */
+        ${MQ_HOVER} {
+            #bfc-toolbar { flex-wrap:wrap; gap:6.75px; padding:8.1px 10.8px; }
+            #bfc-toolbar .bfc-tb-group { gap:5.4px; flex-wrap:wrap; }
+            #bfc-toolbar .bfc-tb-group:first-child { flex:1 1 auto; }
+            .bfc-tb-btn { font-size:14.85px; padding:4.05px 8.1px; border-radius:5.4px; }
+            #bfc-status-pill { font-size:14.85px; padding:2.7px 8.1px; border-radius:5.4px; }
+        }
         #bfc-toast { position:fixed; left:50%; bottom:90px; transform:translateX(-50%); z-index:2147483646; max-width:min(92vw,460px); background:#2a1414; color:#ffd7d7; border:1px solid #a33; border-radius:6px; padding:8px 10px; font:12px/1.4 sans-serif; box-shadow:0 4px 16px rgba(0,0,0,.6); display:flex; gap:8px; align-items:center; }
         #bfc-toast button { background:#3a2020; color:#fff; border:1px solid #a33; border-radius:4px; padding:3px 8px; cursor:pointer; font-size:11px; white-space:nowrap; }
 
@@ -254,6 +267,30 @@
         .bfc-img-wrap { flex:0 0 100%; width:100%; display:flex; flex-wrap:wrap; gap:6px; margin-top:6px; }
         .bfc-img.bfc-frozen { cursor:pointer; }
         .bfc-img { max-width:100%; max-height:200px; border-radius:8px; cursor:zoom-in; object-fit:contain; background:#0d1117; }
+        .bfc-tc-snap { flex:0 0 100%; width:100%; max-height:210px; object-fit:cover; object-position:top; border-radius:6px; border:1px solid #2f353d; background:#222; }
+        .bfc-thread-card { flex-wrap:wrap; flex:1 1 100%; width:100%; min-width:0; max-width:100%; display:flex; gap:9px; align-items:stretch; background:#161b22; border:1px solid #2f353d; border-left:3px solid ${CFG.accentColor}; border-radius:8px; padding:7px; box-sizing:border-box; cursor:pointer; overflow:hidden; -webkit-tap-highlight-color:transparent; }
+        .bfc-thread-card:active { background:#1c232c; }
+        .bfc-tc-thumb { flex:0 0 64px; width:64px; height:64px; border-radius:6px; background:#222a33; display:flex; align-items:center; justify-content:center; font-size:26px; overflow:hidden; }
+        .bfc-tc-thumb img { width:100%; height:100%; object-fit:cover; display:block; }
+        .bfc-tc-body { min-width:0; flex:1; display:flex; flex-direction:column; justify-content:center; gap:2px; }
+        .bfc-tc-title { font-size:13px; font-weight:700; color:#e6edf3; line-height:1.25; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; word-break:break-word; }
+        .bfc-tc-meta { font-size:11px; color:#8b949e; line-height:1.3; word-break:break-word; }
+        .bfc-tc-hint { font-size:11px; color:#7fb3ff; }
+        #bfc-stage { display:none; align-items:center; gap:10px; padding:8px 10px; margin:0 0 4px; background:#1c2128; border:1px solid #30363d; border-radius:8px; }
+        #bfc-stage.bfc-open { display:flex; }
+        .bfc-st-thumb { position:relative; flex:0 0 64px; width:64px; height:64px; border-radius:8px; background:#222; }
+        .bfc-st-thumb img { width:100%; height:100%; object-fit:cover; border-radius:8px; display:block; }
+        .bfc-st-x { position:absolute; top:-7px; right:-7px; width:22px; height:22px; border-radius:50%; border:0; background:#1f2328; color:#fff; font-size:13px; line-height:22px; padding:0; cursor:pointer; box-shadow:0 1px 4px rgba(0,0,0,.6); }
+        .bfc-st-info { flex:1; min-width:0; font-size:12px; color:#c9d1d9; line-height:1.35; }
+        .bfc-st-info small { display:block; color:#8b949e; font-size:11px; }
+        .bfc-st-send { flex:0 0 auto; width:38px; height:38px; border-radius:50%; border:0; background:${CFG.accentColor}; color:#fff; font-size:16px; cursor:pointer; }
+        .bfc-st-send:disabled { opacity:.5; }
+        .bfc-mb-ov { position:fixed; inset:0; z-index:2147483647; background:rgba(0,0,0,.78); display:flex; align-items:center; justify-content:center; padding:8px; box-sizing:border-box; }
+        .bfc-mb-win { width:100%; max-width:900px; height:88%; background:#0d1117; border:1px solid #30363d; border-radius:10px; display:flex; flex-direction:column; overflow:hidden; box-shadow:0 10px 40px rgba(0,0,0,.6); }
+        .bfc-mb-bar { display:flex; align-items:center; gap:8px; padding:7px 10px; background:#161b22; border-bottom:1px solid #30363d; }
+        .bfc-mb-title { flex:1; min-width:0; font-size:12px; font-weight:700; color:#e6edf3; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+        .bfc-mb-btn { background:#21262d; border:1px solid #363b42; color:#e6edf3; border-radius:6px; padding:5px 10px; font-size:13px; cursor:pointer; }
+        .bfc-mb-frame { flex:1; width:100%; border:0; background:#fff; }
         .bfc-lightbox { position:fixed; inset:0; z-index:2147483647; background:rgba(0,0,0,.88); display:flex; align-items:center; justify-content:center; padding:12px; box-sizing:border-box; }
         .bfc-lightbox img, .bfc-lightbox video { max-width:100%; max-height:100%; object-fit:contain; }
 
@@ -573,7 +610,30 @@
         if (el) { el.textContent = message; el.style.color = CFG.mentionColor; }
     }
 
+    // Retry brief network hiccups (connection reset, 5xx) a couple of times before giving up.
+    const isTransientApiError = msg => /ClientException|SocketException|Connection (?:reset|closed|refused)|Could not connect|Failed to fetch|NetworkError|HTTP 5\d\d/i.test(String(msg || ''));
     async function requestApi(path, key) {
+        let lastErr;
+        for (let attempt = 0; attempt < 3; attempt++) {
+            try { return await requestApiOnce(path, key); }
+            catch (error) {
+                lastErr = error;
+                if (!isTransientApiError(error && error.message) || attempt === 2) break;
+                await new Promise(r => setTimeout(r, attempt === 0 ? 1500 : 3500));
+            }
+        }
+        throw lastErr;
+    }
+
+    // Never show the API key (it sits inside the URL in some error messages) and shorten the noise.
+    function friendlyApiError(message) {
+        let m = String(message || '').replace(/key=[A-Za-z0-9]+/gi, 'key=•••');
+        if (/Connection (?:reset|closed|refused)|SocketException|ClientException|Failed to fetch|NetworkError/i.test(m))
+            return 'Connection to Torn API was interrupted (network hiccup). It will retry automatically.';
+        return m;
+    }
+
+    async function requestApiOnce(path, key) {
         if (!key) throw new Error('No API key saved. Enter your key and click Save Settings.');
         const sep = path.includes('?') ? '&' : '?';
         const url = `${API_BASE}${path}${sep}key=${encodeURIComponent(key)}`;
@@ -632,7 +692,7 @@
             lastApiError = '';
             return data;
         } catch (error) {
-            showApiError(error.message || String(error));
+            showApiError(friendlyApiError(error.message || String(error)));
             return null;
         }
     }
@@ -1921,7 +1981,7 @@
         statusPill.textContent = lastApiError ? 'API Error: ' + lastApiError : CFG.apiKey ? 'Loading…' : 'No API Key';
 
         const imgBtn = mkBtn('📷 Image');
-        imgBtn.title = 'Upload an image and insert its link';
+        imgBtn.title = 'Pick an image: preview it, then send it with your message';
         imgBtn.addEventListener('click', () => pickAndUploadImage());
 
         const gifBtn = mkBtn('🎞 GIF');
@@ -2215,7 +2275,7 @@
     const DEFAULT_IMGBB_KEY = '';
     const imgbbKey = () => (CFG.imgbbKey || DEFAULT_IMGBB_KEY || '').trim();
     const IMG_EXT_RE = /\.(?:png|jpe?g|gif|webp)(?:[?#].*)?$/i;
-    const IMG_HOSTS = ['i.imgur.com', 'i.ibb.co', 'iili.io', 'i.postimg.cc', 'cdn.discordapp.com', 'media.discordapp.net', 'images.weserv.nl', 'static.klipy.com'];
+    const IMG_HOSTS = ['i.imgur.com', 'i.ibb.co', 'iili.io', 'i.postimg.cc', 'cdn.discordapp.com', 'media.discordapp.net', 'images.weserv.nl', 'static.klipy.com', 'image.prntscr.com'];
     const IMG_URL_RE = /https?:\/\/[^\s<>"']+/gi;
     const IMG_MAX_PER_MSG = 3;
 
@@ -2371,15 +2431,508 @@
 
     document.addEventListener('visibilitychange', scheduleMediaUpdate);
 
+    // ── Lightshot (prnt.sc / prntscr.com) ─────────────────────────────────────
+    // A prnt.sc link is a web page, not an image. We fetch the page once, read the real screenshot
+    // URL from it (og:image) and then preview that like any other image. Results are cached.
+    const prntCache = new Map();     // page url -> { img: string|null, t: ms, pending: bool, waiters: Set<msgEl> }
+    function isPrntUrl(u) {
+        try {
+            const x = new URL(u);
+            const h = x.hostname.toLowerCase().replace(/^www\./, '');
+            return (h === 'prnt.sc' || h === 'prntscr.com') && /^\/[a-z0-9_-]{4,}\/?$/i.test(x.pathname);
+        } catch (_) { return false; }
+    }
+    function parsePrntImage(html, pageUrl) {
+        const pats = [
+            /<meta[^>]+property=["']og:image["'][^>]*content=["']([^"']+)["']/i,
+            /<meta[^>]+content=["']([^"']+)["'][^>]*property=["']og:image["']/i,
+            /<img[^>]+class=["'][^"']*screenshot-image[^"']*["'][^>]*src=["']([^"']+)["']/i,
+            /<img[^>]+src=["']([^"']+)["'][^>]*class=["'][^"']*screenshot-image[^"']*["']/i,
+        ];
+        for (const re of pats) {
+            const m = html.match(re);
+            if (!m) continue;
+            try {
+                const u = new URL(m[1].replace(/&amp;/g, '&'), pageUrl);
+                if (u.protocol === 'http:') u.protocol = 'https:';
+                if (u.protocol !== 'https:') continue;
+                if (/no-image|st\.prntscr\.com/i.test(u.href)) continue;       // "image not found" placeholder
+                return u.href;
+            } catch (_) {}
+        }
+        return null;
+    }
+    // Returns the resolved image URL, or null while loading / when it can't be resolved.
+    function resolvePrnt(pageUrl, msgEl) {
+        let e = prntCache.get(pageUrl);
+        if (e && (e.pending || e.img)) {
+            if (e.pending) e.waiters.add(msgEl);
+            return e.img;
+        }
+        if (e && Date.now() - e.t < 120000) return null;                           // failed recently
+        e = { img: null, t: Date.now(), pending: true, waiters: new Set([msgEl]) };
+        prntCache.set(pageUrl, e);
+        const done = (img, reason) => {
+            e.img = img; e.pending = false; e.t = Date.now();
+            if (!img) updatePill('Lightshot preview failed: ' + (reason || 'no image found'), true);
+            e.waiters.forEach(m => { if (m && m.isConnected) { try { renderImages(m); } catch (_) {} } });
+            e.waiters.clear();
+        };
+        const UA = 'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Mobile Safari/537.36';
+        const headers = { 'Accept': 'text/html,application/xhtml+xml', 'User-Agent': UA, 'Accept-Language': 'en-US,en;q=0.9' };
+        // Try every available request method (Tampermonkey/PDA GM_xmlhttpRequest, then PDA_httpGet).
+        const attempts = [];
+        if (typeof GM_xmlhttpRequest === 'function') attempts.push(() => new Promise(res => {
+            try {
+                GM_xmlhttpRequest({
+                    method: 'GET', url: pageUrl, timeout: 15000, headers,
+                    onload: r => res({ status: Number(r.status), text: String(r.responseText || '') }),
+                    onerror: () => res({ status: 0, text: '', err: 'network error' }),
+                    ontimeout: () => res({ status: 0, text: '', err: 'timed out' }),
+                });
+            } catch (ex) { res({ status: 0, text: '', err: String(ex && ex.message || ex) }); }
+        }));
+        if (typeof PDA_httpGet === 'function') attempts.push(async () => {
+            try {
+                const r = await withRequestTimeout(PDA_httpGet(pageUrl, headers));
+                return { status: Number(r.status), text: String(r.responseText || '') };
+            } catch (ex) { return { status: 0, text: '', err: String(ex && ex.message || ex).slice(0, 60) }; }
+        });
+        if (!attempts.length) { done(null, 'no request method available'); return null; }
+        (async () => {
+            let reason = '';
+            for (const run of attempts) {
+                const r = await run();
+                if (r.status >= 200 && r.status < 300) {
+                    const img = parsePrntImage(r.text, pageUrl);
+                    if (img) { done(img); return; }
+                    reason = 'screenshot not found on page';
+                } else {
+                    reason = r.status ? 'prnt.sc answered HTTP ' + r.status : (r.err || 'request failed');
+                }
+            }
+            done(null, reason);
+        })();
+        return null;
+    }
+
+    // ── Torn forum thread previews ─────────────────────────────────────────────
+    // A forums.php thread link becomes a small card (title, author, posts, first image). Tapping the
+    // card opens the thread in a mini browser (an in-page window) instead of leaving the chat.
+    const threadCache = new Map();    // thread id -> { data, t } | { pending: Promise }
+    function tornThreadId(u) {
+        try {
+            const x = new URL(u);
+            const h = x.hostname.toLowerCase();
+            if (h !== 'www.torn.com' && h !== 'torn.com') return null;
+            if (!/\/forums\.php$/i.test(x.pathname)) return null;
+            const frag = decodeURIComponent((x.hash || '') + '&' + (x.search || ''));
+            if (!/p=threads/i.test(frag)) return null;
+            const m = frag.match(/[&?#/!]t=(\d+)/);
+            return m ? m[1] : null;
+        } catch (_) { return null; }
+    }
+    const isTornThreadUrl = u => !!tornThreadId(u);
+    // f=999 is the faction forum: those threads are private and the Torn API can't read them.
+    function isFactionForumThread(u) {
+        try { const x = new URL(u); return /[&?#/!]f=999(?:&|$)/i.test(decodeURIComponent(x.hash + '&' + x.search)); }
+        catch (_) { return false; }
+    }
+
+    function threadInfo(id) {
+        const c = threadCache.get(id);
+        if (c && c.data) return Promise.resolve(c.data);
+        if (c && c.pending) return c.pending;
+        const pending = (async () => {
+            let out = null, lastErr = '';
+            try {
+                // Different API v2 path styles; try each quietly (no red error pill) until one works.
+                let res = null;
+                if (CFG.apiKey) {
+                    for (const path of [`/v2/forum/${id}/thread`, `/v2/forum?selections=thread&id=${id}`, `/v2/forum/thread?id=${id}`]) {
+                        try { res = await requestApi(path, CFG.apiKey); if (res && (res.thread || res.title)) break; res = null; }
+                        catch (e) { lastErr = friendlyApiError(e && e.message || String(e)); }
+                    }
+                }
+                threadCache.lastErr = lastErr;
+                const t = res && (res.thread || res);
+                if (t && (t.title || t.id)) {
+                    let thumb = '', excerpt = '';
+                    try {
+                        const doc = new DOMParser().parseFromString(String(t.content || ''), 'text/html');
+                        const im = doc.querySelector('img[src^="https://"]');
+                        if (im) thumb = im.getAttribute('src');
+                        excerpt = (doc.body.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 110);
+                    } catch (_) {}
+                    out = {
+                        title: String(t.title || 'Forum thread'),
+                        author: t.author && (t.author.username || t.author.name) || '',
+                        posts: t.posts, views: t.views, locked: !!t.is_locked,
+                        thumb, excerpt,
+                    };
+                }
+            } catch (_) {}
+            if (out) threadCache.set(id, { data: out, t: Date.now() });
+            else threadCache.delete(id);
+            return out;
+        })();
+        threadCache.set(id, { pending });
+        return pending;
+    }
+
+    function openThreadBrowser(url, title) {
+        document.querySelectorAll('.bfc-mb-ov').forEach(n => n.remove());
+        const ov = document.createElement('div');
+        ov.className = 'bfc-mb-ov';
+        const win = document.createElement('div');
+        win.className = 'bfc-mb-win';
+        const bar = document.createElement('div');
+        bar.className = 'bfc-mb-bar';
+        const ttl = document.createElement('div');
+        ttl.className = 'bfc-mb-title';
+        ttl.textContent = '💬 ' + (title || 'Forum thread');
+        const ext = document.createElement('button');
+        ext.className = 'bfc-mb-btn'; ext.textContent = '↗'; ext.title = 'Open in full page';
+        const x = document.createElement('button');
+        x.className = 'bfc-mb-btn'; x.textContent = '✕'; x.title = 'Close';
+        bar.append(ttl, ext, x);
+        const fr = document.createElement('iframe');
+        fr.className = 'bfc-mb-frame';
+        fr.src = url;
+        win.append(bar, fr);
+        ov.appendChild(win);
+        const close = () => { fr.src = 'about:blank'; ov.remove(); document.removeEventListener('keydown', onKey, true); };
+        const onKey = e => { if (e.key === 'Escape') close(); };
+        x.addEventListener('click', close);
+        ext.addEventListener('click', () => { close(); window.location.href = url; });
+        ov.addEventListener('click', e => { if (e.target === ov) close(); });
+        document.addEventListener('keydown', onKey, true);
+        document.body.appendChild(ov);
+    }
+
+    // ── Private threads (faction forum): read the page itself, only when the card is on screen ──
+    // The API can't see these, so we load the thread page in a hidden iframe (you're logged in and
+    // allowed to read it), pick out title/author/first image, then throw the iframe away. One at a
+    // time, only while the card is visible, with results cached so each thread is loaded once.
+    const PAGE_CACHE_KEY = 'bfc_thread_page_cache_v4';
+    const PAGE_CACHE_TTL = 12 * 3600 * 1000;
+    const pageFail = new Map();           // id -> time of last failure
+    const pageQueue = [];
+    let pageBusy = false;
+
+    function pageCacheRead() {
+        try { return JSON.parse(localStorage.getItem(PAGE_CACHE_KEY) || '{}') || {}; } catch (_) { return {}; }
+    }
+    function pageCacheGet(id) {
+        const e = pageCacheRead()[id];
+        return e && Date.now() - e.t < PAGE_CACHE_TTL ? e.data : null;
+    }
+    function pageCacheSet(id, data) {
+        try {
+            const all = pageCacheRead();
+            all[id] = { t: Date.now(), data };
+            const keys = Object.keys(all).sort((a, b) => all[a].t - all[b].t);
+            while (keys.length > 12) delete all[keys.shift()];
+            localStorage.setItem(PAGE_CACHE_KEY, JSON.stringify(all));
+        } catch (_) {}
+    }
+
+    // Builds a picture of the first post by copying its DOM + computed styles into an SVG
+    // <foreignObject>. Returns a data: URL, or '' if anything goes wrong. Outside images are drawn
+    // as grey blocks (an SVG image can't load other files), text and layout are kept.
+    function snapshotFromDoc(d) {
+        try {
+            const pc = d.querySelector('.post-container');
+            const win = d.defaultView;
+            if (!pc || !win) return '';
+            const rect = pc.getBoundingClientRect();
+            const W = Math.max(200, Math.min(Math.round(rect.width) || 380, 460));
+            const H = Math.max(60, Math.min(Math.round(rect.height) || 200, 300));
+            const PROPS = ['color', 'background-color', 'font-family', 'font-size', 'font-weight', 'font-style', 'line-height',
+                'text-align', 'text-decoration-line', 'text-transform', 'letter-spacing', 'white-space', 'word-break', 'overflow-wrap',
+                'padding-top', 'padding-right', 'padding-bottom', 'padding-left', 'margin-top', 'margin-right', 'margin-bottom', 'margin-left',
+                'border-top-width', 'border-top-style', 'border-top-color', 'border-bottom-width', 'border-bottom-style', 'border-bottom-color',
+                'border-left-width', 'border-left-style', 'border-left-color', 'border-right-width', 'border-right-style', 'border-right-color',
+                'border-radius', 'display', 'flex-direction', 'flex-wrap', 'justify-content', 'align-items', 'flex-grow', 'flex-shrink',
+                'flex-basis', 'width', 'float', 'clear', 'vertical-align', 'list-style-type', 'list-style-position', 'box-sizing'];
+            const styleFor = (el, over) => {
+                const cs = win.getComputedStyle(el);
+                let out = '';
+                for (const pr of PROPS) {
+                    let v = (over && over[pr]) || cs.getPropertyValue(pr);
+                    if (v) out += pr + ':' + v + ';';
+                }
+                return out;
+            };
+            const clone = pc.cloneNode(true);
+            const orig = [pc].concat(Array.from(pc.querySelectorAll('*')));
+            const copy = [clone].concat(Array.from(clone.querySelectorAll('*')));
+            const classes = new Map();
+            const classOf = str => {
+                let c = classes.get(str);
+                if (!c) { c = 's' + classes.size; classes.set(str, c); }
+                return c;
+            };
+            const drop = new Set();
+            const limit = Math.min(orig.length, 500);
+            for (let i = 0; i < orig.length; i++) {
+                const o = orig[i], c = copy[i];
+                if (i >= limit) { drop.add(c); continue; }
+                const tag = o.tagName.toLowerCase();
+                if (/^(script|style|link|iframe|video|audio|object|embed|canvas|svg|noscript|button|input|textarea|select)$/.test(tag)) { drop.add(c); continue; }
+                const cs = win.getComputedStyle(o);
+                if (cs.display === 'none' || cs.visibility === 'hidden') { drop.add(c); continue; }
+                if (tag === 'img') {
+                    const r = o.getBoundingClientRect();
+                    const ph = d.createElement('span');
+                    c.replaceWith(ph);
+                    copy[i] = ph;
+                    ph.setAttribute('class', classOf(styleFor(o, {
+                        'display': 'inline-block', 'width': Math.max(8, Math.round(r.width)) + 'px',
+                        'background-color': '#3a3f46', 'border-radius': '4px',
+                    }) + 'height:' + Math.max(8, Math.round(r.height)) + 'px;'));
+                    continue;
+                }
+                for (const a of Array.from(c.attributes)) c.removeAttribute(a.name);
+                c.setAttribute('class', classOf(styleFor(o)));
+            }
+            drop.forEach(n => { try { n.remove(); } catch (_) {} });
+
+            let bg = '';
+            for (let n = pc; n && !bg; n = n.parentElement) {
+                const b = win.getComputedStyle(n).backgroundColor;
+                if (b && !/rgba?\(\s*0,\s*0,\s*0,\s*0\s*\)|transparent/i.test(b)) bg = b;
+            }
+            let css = '';
+            classes.forEach((c, str) => { css += '.' + c + '{' + str + '}'; });
+            const wrap = d.createElement('div');
+            wrap.setAttribute('style', `width:${W}px;height:${H}px;overflow:hidden;box-sizing:border-box;background:${bg || '#222'};`);
+            const st = d.createElement('style');
+            st.textContent = css;
+            wrap.append(st, clone);
+            let xml = new win.XMLSerializer().serializeToString(wrap);
+            xml = xml.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '');
+            const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}"><foreignObject x="0" y="0" width="${W}" height="${H}">${xml}</foreignObject></svg>`;
+            const url = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+            return url.length > 400000 ? '' : url;
+        } catch (_) { return ''; }
+    }
+
+    function extractThreadFromDoc(d) {
+        const clean = t => String(t || '').replace(/\s+/g, ' ').trim();
+        const generic = /^(forums?|faction|torn|torn city|loading.*)$/i;
+        let title = '';
+        const sels = ['.thread-name', '.forum-thread-title', '.thread-title', '.t-title', '#forums-page-wrap .title-black',
+                      '#forums-page-wrap [class*="thread"][class*="title"]', '#forums-page-wrap [class*="title"]'];
+        // A breadcrumb ("Forum > Main > My Faction > ... > Thread title") has many child elements:
+        // the thread title is the last one. Otherwise use the element's whole text.
+        const noise = /^(subscribe|unsubscribe|subscribed|reply|new thread|mute|unmute|report|share|bookmark|follow|watch|options|search|forums?|main|my faction|faction|home|prev|next|first|last|page.*|\d+)$/i;
+        const titleText = el => {
+            if (el.children.length >= 4) {
+                const parts = Array.from(el.querySelectorAll('*'))
+                    .filter(n => !n.children.length)
+                    .map(n => clean(n.textContent))
+                    .filter(t => t.length > 1 && !noise.test(t));
+                return parts.length ? parts[parts.length - 1] : '';
+            }
+            return clean(el.textContent);
+        };
+        for (const sel of sels) {
+            for (const el of d.querySelectorAll(sel)) {
+                const t = titleText(el);
+                if (t.length >= 2 && t.length <= 250 && !generic.test(t)) { title = t; break; }
+            }
+            if (title) break;
+        }
+        if (!title) {
+            const t = clean((d.title || '').replace(/\s*[|\-–]\s*TORN.*$/i, ''));
+            if (t && !generic.test(t)) title = t;
+        }
+        const pc = d.querySelector('.post-container');
+        let author = '', excerpt = '', thumb = '';
+        if (pc) {
+            for (const sel of ['.poster-name', 'a.user.name', '.user.name', '.poster a', 'a[href*="profiles.php?XID="]']) {
+                const el = pc.querySelector(sel);
+                if (el && clean(el.textContent)) { author = clean(el.textContent).replace(/\s*\[\d+\]\s*$/, ''); break; }
+            }
+            for (const sel of ['.post', '.post-content', '[class*="post-text"]', '.post-body']) {
+                const el = pc.querySelector(sel);
+                if (el && clean(el.textContent).length > 2) { excerpt = clean(el.textContent).slice(0, 110); break; }
+            }
+            for (const im of pc.querySelectorAll('img')) {
+                const src = im.getAttribute('src') || '';
+                if (!/^https:\/\//i.test(src) || /emoji|smil|avatar|sprite|\/images\/v2\//i.test(src)) continue;
+                if (im.closest('.poster, .user-info, [class*="avatar"], [class*="poster"]')) continue;
+                thumb = src; break;
+            }
+        }
+        return title ? { title, author, posts: null, views: null, locked: false, thumb, excerpt, snap: '' } : null;
+    }
+
+    function pageQueueNext() {
+        if (pageBusy) return;
+        const job = pageQueue.shift();
+        if (!job) return;
+        pageBusy = true;
+        const fr = document.createElement('iframe');
+        fr.setAttribute('aria-hidden', 'true');
+        fr.tabIndex = -1;
+        fr.style.cssText = 'position:fixed;left:-10000px;top:0;width:412px;height:800px;border:0;opacity:0;pointer-events:none;';
+        let finished = false, timer = 0, lastSig = '';
+        const finish = info => {
+            if (finished) return;
+            finished = true;
+            clearInterval(timer);
+            try { fr.src = 'about:blank'; } catch (_) {}
+            fr.remove();
+            if (info) pageCacheSet(job.id, info); else pageFail.set(job.id, Date.now());
+            job.resolve(info);
+            setTimeout(() => { pageBusy = false; pageQueueNext(); }, 700);
+        };
+        const t0 = Date.now();
+        timer = setInterval(() => {
+            if (Date.now() - t0 > 15000) { finish(null); return; }
+            try {
+                const d = fr.contentDocument;
+                if (!d || !d.body || !d.querySelector('.post-container')) return;
+                const info = extractThreadFromDoc(d);
+                if (!info) return;
+                const sig = info.title + '|' + info.excerpt;
+                if (sig !== lastSig) { lastSig = sig; return; }      // wait until the page has settled
+                info.snap = snapshotFromDoc(d);
+                finish(info);
+            } catch (_) { /* not readable yet */ }
+        }, 450);
+        fr.src = job.url;
+        document.body.appendChild(fr);
+    }
+
+    function loadThreadFromPage(id, url) {
+        const cached = pageCacheGet(id);
+        if (cached) return Promise.resolve(cached);
+        if (Date.now() - (pageFail.get(id) || 0) < 30 * 60 * 1000) return Promise.resolve(null);
+        return new Promise(resolve => {
+            pageQueue.push({ id, url, resolve });
+            pageQueueNext();
+        });
+    }
+
+    let threadCardIO = null;
+    function whenCardVisible(card, fn) {
+        if (typeof IntersectionObserver !== 'function') { fn(); return; }
+        if (!threadCardIO) {
+            threadCardIO = new IntersectionObserver(entries => {
+                entries.forEach(en => {
+                    if (!en.isIntersecting) return;
+                    threadCardIO.unobserve(en.target);
+                    const f = en.target._bfcOnVisible;
+                    en.target._bfcOnVisible = null;
+                    if (f && !document.hidden) f();
+                });
+            }, { rootMargin: '0px' });
+        }
+        card._bfcOnVisible = fn;
+        threadCardIO.observe(card);
+    }
+
+    function buildThreadCard(u) {
+        const id = tornThreadId(u);
+        const card = document.createElement('div');
+        card.className = 'bfc-thread-card';
+        const thumb = document.createElement('div');
+        thumb.className = 'bfc-tc-thumb';
+        thumb.textContent = '💬';
+        const body = document.createElement('div');
+        body.className = 'bfc-tc-body';
+        const title = document.createElement('div');
+        title.className = 'bfc-tc-title';
+        title.textContent = 'Torn forum thread #' + id;
+        const meta = document.createElement('div');
+        meta.className = 'bfc-tc-meta';
+        meta.textContent = 'Loading…';
+        const hint = document.createElement('div');
+        hint.className = 'bfc-tc-hint';
+        hint.textContent = 'Tap to open';
+        body.append(title, meta, hint);
+        card.append(thumb, body);
+        let shownTitle = '';
+        card.addEventListener('click', e => {
+            e.preventDefault(); e.stopPropagation();
+            openThreadBrowser(u, shownTitle || title.textContent);
+        });
+
+        const applyInfo = info => {
+            shownTitle = info.title;
+            title.textContent = info.title;
+            const bits = [];
+            if (info.author) bits.push('by ' + info.author);
+            if (info.posts != null) bits.push(info.posts + ' posts');
+            if (info.views != null) bits.push(info.views + ' views');
+            if (info.locked) bits.push('🔒');
+            meta.textContent = bits.join(' · ') || info.excerpt || '';
+            card.querySelectorAll('.bfc-tc-snap').forEach(n => n.remove());
+            if (info.snap) {
+                const sn = document.createElement('img');
+                sn.className = 'bfc-tc-snap';
+                sn.alt = '';
+                sn.addEventListener('error', () => sn.remove());
+                sn.src = info.snap;
+                card.appendChild(sn);
+            }
+            if (!info.thumb && /\[poll\]/i.test(info.title)) thumb.textContent = '📊';
+            if (info.thumb) {
+                const im = document.createElement('img');
+                im.referrerPolicy = 'no-referrer';
+                im.alt = '';
+                im.addEventListener('error', () => { im.remove(); thumb.textContent = '💬'; });
+                im.src = info.thumb;
+                thumb.textContent = '';
+                thumb.appendChild(im);
+            }
+        };
+
+        // Private thread: fill the card from the page itself, but only once it's on screen.
+        const startPrivate = (name) => {
+            title.textContent = name;
+            const cached = pageCacheGet(id);
+            if (cached) { applyInfo(cached); return; }
+            meta.textContent = 'Private to your faction. Details load when this is in view.';
+            whenCardVisible(card, () => {
+                meta.textContent = 'Loading thread details…';
+                loadThreadFromPage(id, u).then(info => {
+                    if (info) applyInfo(info);
+                    else meta.textContent = 'Private to your faction, so no preview details. Tap to read it here.';
+                });
+            });
+        };
+
+        if (isFactionForumThread(u)) { startPrivate('Faction forum thread'); return card; }
+        threadInfo(id).then(info => {
+            if (!info && /Torn API 6/i.test(threadCache.lastErr || '')) { startPrivate('Forum thread #' + id); return; }
+            if (!info) { meta.textContent = CFG.apiKey ? 'Thread info unavailable' + (threadCache.lastErr ? ' · ' + threadCache.lastErr : '') : 'Add your API key for thread info'; return; }
+            applyInfo(info);
+        });
+        return card;
+    }
+
     function renderImages(msgEl) {
         if (!CFG.imagePreviews) return;
         const bodyEl = findBodyEl(msgEl) || msgEl;
-        const text = messageText(bodyEl, msgEl, true) + ' ' +
+        let text = messageText(bodyEl, msgEl, true) + ' ' +
             Array.from(bodyEl.querySelectorAll('a[href]')).map(a => a.href).join(' ');
+        // Lightshot links typed without "https://" (e.g. "prnt.sc/abc123")
+        text += ' ' + ((text.match(/(?<![\/\w.-])(?:www\.)?(?:prnt\.sc|prntscr\.com)\/[a-z0-9_-]{4,}/gi) || []).map(x => 'https://' + x).join(' '));
         const urls = [];
         (text.match(IMG_URL_RE) || []).forEach(u => {
             u = u.replace(/[),.;!?]+$/, '');
-            if (!urls.includes(u) && !failedImgs.has(u) && imageUrlAllowed(u)) urls.push(u);
+            if (urls.includes(u) || failedImgs.has(u)) return;
+            if (isTornThreadUrl(u)) { urls.push(u); return; }   // forum thread -> preview card
+            if (isPrntUrl(u)) {                              // Lightshot page -> real screenshot URL
+                const real = resolvePrnt(u, msgEl);
+                if (real && !urls.includes(real) && !failedImgs.has(real)) urls.push(real);
+                return;
+            }
+            if (imageUrlAllowed(u)) urls.push(u);
         });
         const sig = urls.slice(0, IMG_MAX_PER_MSG).join('|');
         const old = msgEl.querySelector(':scope > .bfc-img-wrap');
@@ -2390,6 +2943,7 @@
         wrap.className = 'bfc-img-wrap';
         wrap.dataset.sig = sig;
         urls.slice(0, IMG_MAX_PER_MSG).forEach(u => {
+            if (isTornThreadUrl(u)) { wrap.appendChild(buildThreadCard(u)); return; }
             if (isVideoUrl(u)) {
                 // Klipy serves some GIFs as looping MP4s: show them as a muted autoplay video.
                 const v = document.createElement('video');
@@ -2572,27 +3126,127 @@
         throw new Error(errors.join(' / '));
     }
 
+    // ── Staged image (Discord-style): pick -> preview with ✕ -> sent together with your message ──
+    let stage = null;            // { file, objUrl, promise, link, error }
+    let stageBusy = false, stageBypass = false;
+    let stageEl = null;
+
+    function stageClear() {
+        if (stage && stage.objUrl) { try { URL.revokeObjectURL(stage.objUrl); } catch (_) {} }
+        stage = null; stageBusy = false;
+        if (stageEl) { stageEl.classList.remove('bfc-open'); stageEl.textContent = ''; }
+    }
+
+    function stageRender(statusText, sub) {
+        if (!stageEl || !stage) return;
+        stageEl.textContent = '';
+        const th = document.createElement('div'); th.className = 'bfc-st-thumb';
+        const im = document.createElement('img'); im.alt = ''; im.src = stage.objUrl;
+        const x = document.createElement('button'); x.type = 'button'; x.className = 'bfc-st-x'; x.textContent = '✕'; x.title = 'Remove image';
+        x.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); stageClear(); });
+        th.append(im, x);
+        const info = document.createElement('div'); info.className = 'bfc-st-info';
+        info.textContent = statusText;
+        if (sub) { const sm = document.createElement('small'); sm.textContent = sub; info.appendChild(sm); }
+        const send = document.createElement('button'); send.type = 'button'; send.className = 'bfc-st-send'; send.textContent = '➤';
+        send.title = 'Send image now'; send.disabled = stageBusy;
+        send.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); sendStaged(); });
+        stageEl.append(th, info, send);
+        stageEl.classList.add('bfc-open');
+    }
+
+    function stageImage(file) {
+        if (!toolbar || !toolbar.parentNode) { updatePill('Open faction chat first', true); return; }
+        stageClear();
+        if (!stageEl || !stageEl.isConnected) {
+            stageEl = document.createElement('div');
+            stageEl.id = 'bfc-stage';
+            toolbar.parentNode.insertBefore(stageEl, toolbar);
+        }
+        const kb = file.size / 1024;
+        const size = kb > 1024 ? (kb / 1024).toFixed(1) + ' MB' : Math.round(kb) + ' KB';
+        stage = { file, objUrl: URL.createObjectURL(file), link: '', error: '' };
+        stageRender('Uploading…', size);
+        // Upload in the background right away so it's ready when you send.
+        stage.promise = uploadImage(file).then(link => {
+            if (!stage || stage.file !== file) return link;
+            stage.link = link;
+            stageRender('Ready — it will be sent with your message', size);
+            return link;
+        }).catch(err => {
+            if (stage && stage.file === file) { stage.error = err.message; stageRender('Upload failed', err.message + ' · tap ➤ to retry'); }
+            throw err;
+        });
+        stage.promise.catch(() => {});
+    }
+
+    async function sendStaged() {
+        if (!stage || stageBusy) return false;
+        const input = chatBoxEl && chatBoxEl.querySelector('textarea');
+        if (!input) { updatePill('Open faction chat first', true); return false; }
+        stageBusy = true;
+        const cur = stage;
+        stageRender('Sending…', '');
+        try {
+            if (cur.error) { cur.error = ''; cur.link = ''; cur.promise = uploadImage(cur.file).then(l => (cur.link = l)); }
+            const link = cur.link || await cur.promise;
+            if (stage !== cur) return false;                 // removed meanwhile
+            const typed = (input.value || '').trim();
+            const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set;
+            if (setter) setter.call(input, ''); else input.value = '';
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+            stageBypass = true;
+            let ok;
+            try { ok = sendChatMessage((typed ? typed + ' ' : '') + link); } finally { stageBypass = false; }
+            if (ok) { updatePill('Image sent ✓'); stageClear(); return true; }
+            updatePill('Open faction chat first', true);
+        } catch (e) {
+            cur.error = e.message;
+            stageBusy = false;
+            stageRender('Upload failed', e.message + ' · tap ➤ to retry');
+            updatePill('Upload failed: ' + e.message, true);
+            return false;
+        }
+        stageBusy = false;
+        if (stage) stageRender('Ready — it will be sent with your message', '');
+        return false;
+    }
+
+    // Intercept the chat's own send (paper-plane button or Enter) while an image is staged.
+    function isChatSendButton(b) {
+        if (!chatBoxEl || !chatBoxEl.contains(b) || b.closest('#bfc-toolbar, #bfc-stage, .bfc-msg-container')) return false;
+        const lbl = `${b.getAttribute('aria-label') || ''} ${b.title || ''} ${b.className || ''}`.toLowerCase();
+        if (/send|submit|plane/.test(lbl)) return true;
+        const ta = chatBoxEl.querySelector('textarea');
+        return !!(ta && (ta.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING) && b.querySelector('svg'));
+    }
+    document.addEventListener('click', e => {
+        if (!stage || stageBypass || !e.isTrusted) return;
+        const b = e.target.closest && e.target.closest('button, [role="button"]');
+        if (b && isChatSendButton(b)) { e.preventDefault(); e.stopImmediatePropagation(); sendStaged(); }
+    }, true);
+    document.addEventListener('keydown', e => {
+        if (!stage || stageBypass || e.key !== 'Enter' || e.shiftKey || e.isComposing) return;
+        if (!chatBoxEl || e.target !== chatBoxEl.querySelector('textarea')) return;
+        if (mentionSuggestPopup && mentionSuggestPopup.classList.contains('bfc-open')) return;
+        e.preventDefault(); e.stopImmediatePropagation();
+        sendStaged();
+    }, true);
+
     function pickAndUploadImage() {
         const input = document.createElement('input');
         input.type = 'file';
         input.accept = 'image/*';
         input.style.display = 'none';
-        input.addEventListener('change', async () => {
+        input.addEventListener('change', () => {
             const file = input.files && input.files[0];
             input.remove();
             if (!file) return;
-            try {
-                updatePill('Uploading image…');
-                const link = await uploadImage(file);
-                if (CFG.imageAutoSend) {
-                    if (sendChatMessage(link)) updatePill('Image sent ✓');
-                    else updatePill('Open faction chat first', true);
-                } else if (insertTextIntoChat(link)) {
-                    updatePill('Image link added — press send');
-                }
-            } catch (e) {
-                updatePill('Upload failed: ' + e.message, true);
+            if (!/^image\//i.test(file.type || '') && !/\.(png|jpe?g|gif|webp)$/i.test(file.name || '')) {
+                updatePill('That file is not an image', true);
+                return;
             }
+            stageImage(file);
         });
         document.body.appendChild(input);
         input.click();
