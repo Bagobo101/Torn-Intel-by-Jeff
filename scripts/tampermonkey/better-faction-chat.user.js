@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Better Faction Chat – Torn.com (Desktop + Torn PDA)
 // @namespace    https://torn.com/
-// @version      2.21.0
+// @version      2.21.1
 // @description  Desktop and Torn PDA faction chat tools: status, group tags, officer groups, search, timestamps, reactions, image uploads, GIFs and touch-friendly controls
 // @author       sercann
 // @match        https://www.torn.com/*
@@ -25,8 +25,6 @@
 // @connect      *
 // @run-at       document-start
 // @license      MIT
-// @downloadURL  https://raw.githubusercontent.com/Bagobo101/Torn-Intel-by-Jeff/refs/heads/main/scripts/tampermonkey/better-faction-chat.user.js
-// @uploadURL    https://raw.githubusercontent.com/Bagobo101/Torn-Intel-by-Jeff/refs/heads/main/scripts/tampermonkey/better-faction-chat.user.js
 // ==/UserScript==
 
 (function () {
@@ -34,7 +32,7 @@
     // The thread mini-browser loads a Torn page in an iframe; don't start a second copy of BFC in it.
     try { if (window.top !== window.self) return; } catch (_) { return; }
 
-    const BFC_VERSION = '2.21.0';
+    const BFC_VERSION = '2.21.1';
     const STORE_KEY   = 'bfc_settings_v2';
     const API_BASE    = 'https://api.torn.com';
     const PDA_KEY     = '###PDA-APIKEY###';
@@ -1381,6 +1379,7 @@
     const pinsConfigured = () => Boolean(pinsBase() && pinsRoomId());
 
     // ---- local copy of the pins: shown instantly on load, then refreshed from the server ----
+    const PINS_MAX = 100;                                   // keep in step with MAX_PINS in the pins server
     const PINS_CACHE_KEY = 'bfc_pins_cache_v1';
     function savePinsCache() {
         try { localStorage.setItem(PINS_CACHE_KEY, JSON.stringify({ room: pinsRoomId(), pins: pinsState.pins })); } catch (_) {}
@@ -1477,7 +1476,7 @@
         // Show it straight away; the server confirms in the background (and we undo if it fails).
         const before = pinsState.pins.slice();
         const time = getMsgEpoch(msgEl), clock = (msgEl.dataset.bfcTime || '');
-        pinsState.pins = before.concat([{ id: 'tmp' + Date.now(), text, author, by: myIdentity().name || '', time, clock, t: Date.now() }]).slice(-5);
+        pinsState.pins = before.concat([{ id: 'tmp' + Date.now(), text, author, by: myIdentity().name || '', time, clock, t: Date.now() }]).slice(-PINS_MAX);
         renderPinBar();
         document.querySelectorAll('.bfc-qr.bfc-open').forEach(q => q.classList.remove('bfc-open'));
         try {
