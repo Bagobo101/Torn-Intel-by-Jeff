@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Better Faction Chat – Torn.com (Desktop + Torn PDA)
 // @namespace    https://torn.com/
-// @version      2.13.1
+// @version      2.21.0
 // @description  Desktop and Torn PDA faction chat tools: status, group tags, officer groups, search, timestamps, reactions, image uploads, GIFs and touch-friendly controls
 // @author       sercann
 // @match        https://www.torn.com/*
@@ -25,8 +25,6 @@
 // @connect      *
 // @run-at       document-start
 // @license      MIT
-// @updateURL    https://raw.githubusercontent.com/Bagobo101/Torn-Intel-by-Jeff/refs/heads/main/scripts/tampermonkey/better-faction-chat.user.js
-// @downloadURL  https://raw.githubusercontent.com/Bagobo101/Torn-Intel-by-Jeff/refs/heads/main/scripts/tampermonkey/better-faction-chat.user.js
 // ==/UserScript==
 
 (function () {
@@ -34,7 +32,7 @@
     // The thread mini-browser loads a Torn page in an iframe; don't start a second copy of BFC in it.
     try { if (window.top !== window.self) return; } catch (_) { return; }
 
-    const BFC_VERSION = '2.13.1';
+    const BFC_VERSION = '2.21.0';
     const STORE_KEY   = 'bfc_settings_v2';
     const API_BASE    = 'https://api.torn.com';
     const PDA_KEY     = '###PDA-APIKEY###';
@@ -46,6 +44,7 @@
         username:         '',
         userId:           '',
         factionName:      '',
+        factionId:        '',
         factionTag:       '',
         refreshInterval:  60,
         showTimestamps:   true,
@@ -59,6 +58,8 @@
         quickReactions:   ['👍', '😂', '❤️', '🔥'],
         reactionNotify:   true,
         reactionsEnabled: true,
+        pinsUrl:          '',      // pins server address (Cloudflare Worker)
+        closeChatOnLink:  true,    // collapse the faction chat when a link in it is opened
         imagePreviews:    true,
         imageAutoSend:    true,
         imageAnyHost:     false,
@@ -221,6 +222,34 @@
         .bfc-nav-btn:hover { background:rgba(255,255,255,.35); }
 
         .bfc-chat-hidden { display:none!important; }
+        #bfc-pin-bar { display:none; position:absolute; right:8px; top:48px; z-index:7; }
+        #bfc-pin-bar.bfc-has { display:block; }
+        #bfc-pin-bar .bfc-pin-btn { position:relative; width:38px; height:38px; border-radius:50%; border:1px solid #8a6d1d; background:#2a2108; color:#f2cc60; font-size:18px; line-height:1; cursor:pointer; box-shadow:0 2px 8px rgba(0,0,0,.5); display:flex; align-items:center; justify-content:center; margin-left:auto; padding:0; }
+        #bfc-pin-bar .bfc-pin-count { position:absolute; top:-4px; right:-4px; min-width:16px; height:16px; border-radius:8px; background:#e5a50a; color:#1b1500; font-size:10px; font-weight:700; display:flex; align-items:center; justify-content:center; padding:0 3px; box-sizing:border-box; }
+        #bfc-pin-bar .bfc-pin-panel { display:none; margin-top:6px; width:min(290px, 72vw); max-height:48vh; overflow-y:auto; background:#1b1500; border:1px solid #8a6d1d; border-radius:10px; padding:6px 10px; color:#f2cc60; font-size:13px; line-height:1.4; box-shadow:0 6px 20px rgba(0,0,0,.6); }
+        #bfc-pin-bar.bfc-open .bfc-pin-panel { display:block; }
+        #bfc-pin-bar .bfc-pin-item { border-top:1px solid #5c4812; padding:7px 0; display:flex; gap:8px; align-items:flex-start; }
+        #bfc-pin-bar .bfc-pin-item:first-child { border-top:0; }
+        #bfc-pin-bar .bfc-pin-item a { color:#58a6ff; word-break:break-all; }
+        #bfc-pin-bar .bfc-pin-body { flex:1; min-width:0; overflow-wrap:anywhere; }
+        #bfc-pin-bar .bfc-pin-by { color:#b08a2a; font-size:11px; margin-top:2px; }
+        #bfc-pin-bar .bfc-pin-x { background:transparent; border:1px solid #8a6d1d; color:#f2cc60; border-radius:6px; padding:2px 8px; font-size:12px; cursor:pointer; }
+        .bfc-is-pinned { position:relative; }
+        .bfc-pin-badge { position:absolute; top:-8px; left:-5px; z-index:4; font-size:14px; line-height:1; padding:4px; cursor:pointer; filter:drop-shadow(0 1px 1px rgba(0,0,0,.7)); -webkit-tap-highlight-color:transparent; }
+        #bfc-pin-bar .bfc-pin-item { cursor:pointer; }
+        #bfc-pin-bar .bfc-pin-sel { background:rgba(229,165,10,.2); box-shadow:0 0 0 1px #e5a50a inset; border-radius:8px; padding-left:6px; padding-right:6px; }
+        #bfc-pin-bar .bfc-pin-when { color:#f2cc60; font-size:12px; font-weight:600; margin-top:3px; }
+        #bfc-sheet { position:fixed; z-index:9999999; background:#0d1117; border:1px solid #21262d; border-radius:10px; box-shadow:0 8px 28px rgba(0,0,0,.7); padding:10px; width:min(340px, calc(100vw - 16px)); max-height:min(60vh, 460px); overflow-y:auto; overscroll-behavior:contain; -webkit-overflow-scrolling:touch; display:none; color:#cdd9e5; font-size:13px; box-sizing:border-box; }
+        #bfc-sheet.bfc-open { display:block; animation:bfc-fadein .15s ease; }
+        #bfc-sheet .bfc-sh-title { color:#8b949e; font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.8px; margin-bottom:8px; }
+        #bfc-sheet .bfc-sh-in { width:100%; box-sizing:border-box; background:#161b22; border:1px solid #30363d; border-radius:6px; color:#e6edf3; padding:8px 10px; font-size:14px; outline:none; }
+        #bfc-sheet .bfc-sh-row { display:flex; justify-content:space-between; gap:8px; padding:7px 4px; border-bottom:1px solid #21262d; }
+        #bfc-sheet .bfc-sh-pick { cursor:pointer; }
+        #bfc-sheet .bfc-sh-pick:active { background:#161b22; }
+        #bfc-sheet .bfc-sh-muted { color:#8b949e; font-size:12px; }
+        #bfc-sheet .bfc-sh-btn { background:#1f6feb; color:#fff; border:0; border-radius:6px; padding:8px 12px; font-size:13px; cursor:pointer; margin-top:8px; }
+        #bfc-sheet .bfc-gal { display:grid; grid-template-columns:repeat(3,1fr); gap:6px; }
+        #bfc-sheet .bfc-gal img { width:100%; aspect-ratio:1; object-fit:cover; border-radius:6px; background:#161b22; cursor:zoom-in; }
         #bfc-toolbar { display:flex; align-items:center; justify-content:space-between; gap:5px; padding:6px 8px; background:#1e1e1e; border-top:1px solid #333; box-sizing:border-box; width:100%; }
         .bfc-tb-group { display:flex; gap:4px; align-items:center; }
         .bfc-tb-btn { background:#2d2d2d; border:1px solid #444; color:#ccc; border-radius:4px; font-size:11px; padding:3px 6px; cursor:pointer; transition:all .15s; white-space:nowrap; }
@@ -260,6 +289,11 @@
         .bfc-qr { position:absolute; right:28px; top:2px; display:none; gap:2px; padding:2px 3px; background:#1b1f24; border:1px solid #3a3f46; border-radius:12px; box-shadow:0 2px 8px rgba(0,0,0,.5); z-index:11; }
         .bfc-qr.bfc-open { display:inline-flex; }
         ${MQ_HOVER} { .bfc-msg-container:hover .bfc-qr { display:inline-flex; } }
+        .bfc-qr-plus { background:rgba(255,255,255,.12)!important; font-weight:700; min-width:22px; }
+        #bfc-sheet .bfc-emo-lbl { color:#8b949e; font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.8px; margin:8px 0 4px; }
+        #bfc-sheet .bfc-emo-grid { display:grid; grid-template-columns:repeat(7, 1fr); gap:2px; }
+        #bfc-sheet .bfc-emo-grid button { background:transparent; border:0; border-radius:8px; font-size:22px; line-height:1; padding:6px 0; cursor:pointer; touch-action:manipulation; }
+        #bfc-sheet .bfc-emo-grid button:active { background:#21262d; }
         .bfc-qr-btn { background:transparent; border:0; border-radius:8px; cursor:pointer; font-size:13px; line-height:1; padding:2px 3px; transition:transform .12s, background .12s; }
         .bfc-qr-btn:hover { background:rgba(255,255,255,.12); transform:scale(1.2); }
         .bfc-qr-btn.bfc-qr-busy { opacity:.45; pointer-events:none; }
@@ -512,8 +546,8 @@
     }
 
     // ── Message text helpers ──────────────────────────────────────────────────
-    const BFC_UI_SELECTOR = '.bfc-ts, .bfc-cp-btn, .bfc-qr, .bfc-icons-wrapper';
-    const BFC_ALWAYS_SKIP = '.bfc-qr, .bfc-rx-row';
+    const BFC_UI_SELECTOR = '.bfc-ts, .bfc-cp-btn, .bfc-qr, .bfc-icons-wrapper, .bfc-pin-badge';
+    const BFC_ALWAYS_SKIP = '.bfc-qr, .bfc-rx-row, .bfc-pin-badge';
     const EMOJI_RX = /\p{Extended_Pictographic}|\p{Regional_Indicator}/u;
 
     // Text of a node without BFC's reaction UI (and optionally without BFC's other UI).
@@ -731,9 +765,11 @@
     async function fetchFactionIdentity() {
         const d = unwrap(await apiFetch('/v2/faction/basic'), 'basic');
         if (!d || !d.name) return;
-        if (d.name !== CFG.factionName || (d.tag || '') !== CFG.factionTag) {
+        const fid = d.id != null ? String(d.id) : '';
+        if (d.name !== CFG.factionName || (d.tag || '') !== CFG.factionTag || (fid && fid !== CFG.factionId)) {
             CFG.factionName = d.name;
             CFG.factionTag  = d.tag || '';
+            if (fid) CFG.factionId = fid;
             saveCfg(CFG);
         }
     }
@@ -1202,6 +1238,398 @@
 
     let mentionStack = [], mentionIdx = 0, notifyBar = null;
 
+    const money = n => (n === null || n === undefined || isNaN(n)) ? 'n/a' : '$' + Number(n).toLocaleString('en-US');
+
+    // ===== Shared bottom sheet (bank confirmation) =====
+    let sheetEl = null, sheetKind = '';
+    function openSheet(kind, anchor) {
+        if (!sheetEl) {
+            sheetEl = document.createElement('div');
+            sheetEl.id = 'bfc-sheet';
+            document.body.appendChild(sheetEl);
+            document.addEventListener('click', e => {
+                if (!sheetEl.classList.contains('bfc-open')) return;
+                // The tapped element may already have been replaced by the panel's own re-render, so
+                // test the event's original path instead of e.target (this is what made the panel close).
+                const path = typeof e.composedPath === 'function' ? e.composedPath() : [];
+                if (path.includes(sheetEl)) return;
+                if (e.target && e.target.closest && e.target.closest('.bfc-tb-btn')) return;
+                sheetEl.classList.remove('bfc-open');
+            });
+        }
+        if (sheetEl.classList.contains('bfc-open') && sheetKind === kind) { sheetEl.classList.remove('bfc-open'); return false; }
+        sheetKind = kind;
+        sheetEl.innerHTML = '';
+        sheetEl.classList.add('bfc-open');
+        const place = () => {
+            const r = anchor.getBoundingClientRect();
+            const w = sheetEl.offsetWidth || 340, h = sheetEl.offsetHeight || 200;
+            sheetEl.style.left = Math.max(8, Math.min(r.left, window.innerWidth - w - 8)) + 'px';
+            sheetEl.style.top = Math.max(8, r.top - h - 8) + 'px';
+        };
+        sheetEl._place = place;
+        place();
+        return true;
+    }
+
+    // ===== "!bank <amount>": request a faction vault withdrawal (same listener + Discord ping as the Bank Request script) =====
+    function parseBankAmount(text) {
+        const cleaned = String(text || '').trim().toLowerCase().replace(/[,$\s]/g, '');
+        if (cleaned === 'all' || cleaned === 'max') return 'all';
+        const m = cleaned.match(/^(\d+(?:\.\d+)?)([kmb])?$/);
+        if (!m) return null;
+        const v = Math.round(Number(m[1]) * ({ k: 1e3, m: 1e6, b: 1e9 }[m[2]] || 1));
+        return Number.isFinite(v) && v > 0 && v <= 1e12 ? v : null;
+    }
+    function openBankRequest(anchor, text) {
+        if (sheetEl) { sheetEl.classList.remove('bfc-open'); sheetKind = ''; }
+        if (!openSheet('bank', anchor)) return;
+        const amount = parseBankAmount(text);
+        const me = myIdentity();
+        const box = sheetEl;
+        if (!amount) { box.innerHTML = `<div class="bfc-sh-title">🏦 Vault request</div><div class="bfc-sh-muted">I couldn't read "${esc(text)}" as an amount. Try <b>!bank 5m</b>, <b>!bank 250k</b> or <b>!bank all</b>.</div>`; sheetEl._place && sheetEl._place(); return; }
+        if (!me.id || !me.name) { box.innerHTML = `<div class="bfc-sh-title">🏦 Vault request</div><div class="bfc-sh-muted">I can't find your name/ID yet. Save your API key in BFC settings (then tap Test Key) and try again.</div>`; sheetEl._place && sheetEl._place(); return; }
+        const label = amount === 'all' ? 'your full vault balance' : money(amount);
+        box.innerHTML = `<div class="bfc-sh-title">🏦 Vault request</div>
+            <div style="margin-bottom:6px">Request <b>${esc(label)}</b> from the faction vault as <b>${esc(me.name)}</b> [${esc(me.id)}]?</div>
+            <div class="bfc-sh-muted">Your bankers get a Discord ping with this request.</div>
+            <div id="bfc-bank-status" class="bfc-sh-muted" style="margin-top:6px"></div>
+            <div style="display:flex;gap:8px"><button class="bfc-sh-btn" id="bfc-bank-ok" type="button">Confirm</button>
+            <button class="bfc-sh-btn" id="bfc-bank-no" type="button" style="background:#30363d">Cancel</button></div>`;
+        sheetEl._place && sheetEl._place();
+        const st = box.querySelector('#bfc-bank-status'), ok = box.querySelector('#bfc-bank-ok'), no = box.querySelector('#bfc-bank-no');
+        no.addEventListener('click', () => sheetEl.classList.remove('bfc-open'));
+        let sending = false;
+        ok.addEventListener('click', async () => {
+            if (sending) return;                       // never send twice
+            sending = true; ok.disabled = no.disabled = true;
+            st.textContent = amount === 'all' ? 'Checking balance and sending…' : 'Sending…';
+            try {
+                const base = await rxResolveBase(false);
+                const res = await rxHttp('POST', base + '/bank-request', {
+                    requester_name: me.name, requester_id: Number(me.id) || me.id, amount,
+                    source: 'bfc-chat', notes: 'Requested from faction chat (' + window.location.pathname + ')',
+                }, 20000);
+                if (!res || !res.ok) throw new Error((res && res.error) || 'unknown_error');
+                const granted = Number(res.request && res.request.amount || 0);
+                st.style.color = '#3fb950';
+                st.textContent = `Requested ${money(granted)} from ${res.faction_name || 'your faction'}${res.capped ? ' (capped to your vault balance)' : ''}.`;
+                updatePill('Vault request sent ✓');
+                setTimeout(() => sheetEl.classList.remove('bfc-open'), 3500);
+            } catch (e) {
+                rx.base = '';
+                st.style.color = '#f85149';
+                st.textContent = 'Failed: ' + (e.message || e) + ' — nothing was sent. You can try again.';
+                ok.disabled = no.disabled = false; sending = false;
+            }
+        });
+    }
+    // ===== "!bank 5m" typed in the chat box: confirm first, then send the vault request =====
+    function bankCommandText() {
+        const ta = chatBoxEl && chatBoxEl.querySelector('textarea');
+        const m = ta && /^\s*!bank\s+(\S.*)$/i.exec(ta.value || '');
+        return m ? { ta, q: m[1].trim() } : null;
+    }
+    function runBankCommand(cmd) {
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set;
+        if (setter) setter.call(cmd.ta, ''); else cmd.ta.value = '';
+        cmd.ta.dispatchEvent(new Event('input', { bubbles: true }));
+        openBankRequest(document.getElementById('bfc-bank-btn') || cmd.ta, cmd.q);
+    }
+    document.addEventListener('keydown', e => {
+        if (e.key !== 'Enter' || e.shiftKey || e.isComposing) return;
+        if (!chatBoxEl || e.target !== chatBoxEl.querySelector('textarea')) return;
+        const cmd = bankCommandText();
+        if (!cmd) return;
+        e.preventDefault(); e.stopImmediatePropagation();
+        runBankCommand(cmd);
+    }, true);
+    document.addEventListener('click', e => {
+        const b = e.target.closest && e.target.closest('button, [role="button"]');
+        if (!b || !isChatSendButton(b)) return;
+        const cmd = bankCommandText();
+        if (!cmd) return;
+        e.preventDefault(); e.stopImmediatePropagation();
+        runBankCommand(cmd);
+    }, true);
+    // The 🏦 button types "!bank " into Torn's own chat box.
+    function startBankCommand() {
+        if (sheetEl) sheetEl.classList.remove('bfc-open');
+        const ta = chatBoxEl && chatBoxEl.querySelector('textarea');
+        if (!ta) { updatePill('Open faction chat first', true); return; }
+        if (!(ta.value || '').trim()) {
+            const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set;
+            if (setter) setter.call(ta, '!bank '); else ta.value = '!bank ';
+            ta.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+        ta.focus();
+        try { const n = ta.value.length; ta.setSelectionRange(n, n); } catch (_) {}
+        updatePill('Type the amount (5m, 250k, all), then send');
+    }
+
+    // ===== Pinned comments (shared through your own pins server) =====
+    const pinsState = { pins: [], t: 0, err: '' };
+    let pinBar = null;
+    // Built-in pins server, so members don't have to type it. (A userscript is plain text: this address is not
+    // secret, and it is useless without the room code. Keep the room code out of anything public.)
+    const DEFAULT_PINS_URL = 'https://bfc-pins.bagobo101.workers.dev';
+    const pinsBase = () => ((CFG.pinsUrl || '').trim() || DEFAULT_PINS_URL).replace(/\/+$/, '');
+    // The room is your faction's own ID, so every member of the faction shares the same pins with nothing to type.
+    const pinsRoomId = () => (CFG.factionId ? 'faction:' + CFG.factionId : '');
+    const pinsConfigured = () => Boolean(pinsBase() && pinsRoomId());
+
+    // ---- local copy of the pins: shown instantly on load, then refreshed from the server ----
+    const PINS_CACHE_KEY = 'bfc_pins_cache_v1';
+    function savePinsCache() {
+        try { localStorage.setItem(PINS_CACHE_KEY, JSON.stringify({ room: pinsRoomId(), pins: pinsState.pins })); } catch (_) {}
+    }
+    function loadPinsCache() {
+        try {
+            const c = JSON.parse(localStorage.getItem(PINS_CACHE_KEY) || 'null');
+            if (c && c.room && c.room === pinsRoomId() && Array.isArray(c.pins)) pinsState.pins = c.pins;
+        } catch (_) {}
+    }
+
+    let pinsFetching = null, pinsLastFetch = 0;
+    function fetchPins(announce, minGapMs) {
+        if (!pinsConfigured()) return Promise.resolve();
+        if (pinsFetching) return pinsFetching;
+        if (!announce && minGapMs && Date.now() - pinsLastFetch < minGapMs) return Promise.resolve();
+        pinsFetching = (async () => {
+            try {
+                const res = await rxHttp('GET', `${pinsBase()}/pins?room=${encodeURIComponent(pinsRoomId())}`, null, 12000);
+                if (!res || !res.ok) throw new Error((res && res.error) || 'bad reply');
+                pinsState.pins = Array.isArray(res.pins) ? res.pins : [];
+                pinsState.err = '';
+                pinsLastFetch = Date.now();
+                savePinsCache();
+                if (announce) updatePill('Pins connected ✓');
+            } catch (e) {
+                pinsState.err = String(e.message || e);
+                if (announce) updatePill('Pins server: ' + pinsState.err, true);
+            } finally { pinsFetching = null; }
+            renderPinBar();
+        })();
+        return pinsFetching;
+    }
+
+    async function pinsPost(path, body) {
+        const res = await rxHttp('POST', pinsBase() + path, Object.assign({ room: pinsRoomId() }, body), 12000);
+        if (!res || !res.ok) throw new Error((res && res.error) || 'bad reply');
+        pinsState.pins = Array.isArray(res.pins) ? res.pins : pinsState.pins;
+        pinsLastFetch = Date.now();
+        savePinsCache();
+        renderPinBar();
+        return res;
+    }
+
+    // The message's exact send time (seconds since 1970), read from Torn's own message data like the timestamps are.
+    function getMsgEpoch(msgEl) {
+        if (msgEl.dataset.bfcEpoch) return Number(msgEl.dataset.bfcEpoch) || 0;
+        const tries = Number(msgEl.dataset.bfcEpochTries || 0);
+        if (tries >= 3) return 0;
+        msgEl.dataset.bfcEpochTries = String(tries + 1);
+        let found = null;
+        try {
+            for (const el of [msgEl, ...msgEl.querySelectorAll('*')]) {
+                let node = fiberOf(el);
+                for (let i = 0; node && i < 4; i++) {
+                    const pr = node.memoizedProps || node.pendingProps;
+                    if (pr) {
+                        if (pr.message && typeof pr.message.time === 'number')      { found = pr.message.time; break; }
+                        if (typeof pr.time === 'number' && pr.time > 1600000000)    { found = pr.time; break; }
+                        if (pr.message && typeof pr.message.timestamp === 'number') { found = pr.message.timestamp; break; }
+                        if (typeof pr.timestamp === 'number' && pr.timestamp > 1e9) { found = pr.timestamp; break; }
+                    }
+                    node = node.return;
+                }
+                if (found) break;
+            }
+        } catch (_) {}
+        if (!found) return 0;
+        const sec = found < 1e12 ? Math.floor(found) : Math.floor(found / 1000);
+        msgEl.dataset.bfcEpoch = String(sec);
+        return sec;
+    }
+
+    // Does this chat message match this pin? Same text AND same send time (when both are known).
+    function msgMatchesPin(msgEl, pin) {
+        if (pinNorm(msgEl) !== pin.text) return false;
+        if (!pin.time) return true;                 // older pin saved without a time: text only
+        const e = getMsgEpoch(msgEl);
+        return !e || e === pin.time;                // time unreadable here: can't tell them apart, accept
+    }
+
+    const pinNorm = msgEl => messageText(findBodyEl(msgEl) || msgEl, msgEl, true).replace(/\s+/g, ' ').trim();
+    const pinFor = msgEl => { const t = pinNorm(msgEl); return t ? (pinsState.pins.find(p => p.text === t && msgMatchesPin(msgEl, p)) || null) : null; };
+
+    // One pin per message: pinning an already-pinned message unpins it.
+    async function pinMessage(msgEl) {
+        if (!pinsConfigured()) { updatePill('Set the pins server in BFC settings', true); return; }
+        const existing = pinFor(msgEl);
+        if (existing) { await unpinMessage(existing.id); return; }
+        const text = pinNorm(msgEl);
+        if (!text) { updatePill('Nothing to pin', true); return; }
+        const nameLink = msgEl.querySelector('a[href*="XID="]');
+        const author = nameLink ? (nameLink.textContent || '').replace(/[:\s]+$/, '').trim() : '';
+        // Show it straight away; the server confirms in the background (and we undo if it fails).
+        const before = pinsState.pins.slice();
+        const time = getMsgEpoch(msgEl), clock = (msgEl.dataset.bfcTime || '');
+        pinsState.pins = before.concat([{ id: 'tmp' + Date.now(), text, author, by: myIdentity().name || '', time, clock, t: Date.now() }]).slice(-5);
+        renderPinBar();
+        document.querySelectorAll('.bfc-qr.bfc-open').forEach(q => q.classList.remove('bfc-open'));
+        try {
+            await pinsPost('/pin', { text, author, by: myIdentity().name || '', time, clock });
+            updatePill('Pinned ✓');
+        } catch (e) { pinsState.pins = before; renderPinBar(); updatePill('Pin failed: ' + (e.message || e), true); }
+    }
+
+    async function unpinMessage(id) {
+        const before = pinsState.pins.slice();
+        pinsState.pins = before.filter(p => p.id !== id);
+        renderPinBar();
+        if (String(id).startsWith('tmp')) return;           // not on the server yet
+        try { await pinsPost('/unpin', { id }); updatePill('Unpinned'); }
+        catch (e) { pinsState.pins = before; renderPinBar(); updatePill('Unpin failed: ' + (e.message || e), true); }
+    }
+
+    function buildPinBar(container) {
+        const existing = container.querySelector('#bfc-pin-bar');
+        if (existing) { pinBar = existing; return; }
+        try { if (getComputedStyle(container).position === 'static') container.style.position = 'relative'; } catch (_) {}
+        pinBar = document.createElement('div');
+        pinBar.id = 'bfc-pin-bar';
+        pinBar.addEventListener('click', e => {
+            const x = e.target.closest && e.target.closest('.bfc-pin-x');
+            if (x) { e.stopPropagation(); unpinMessage(x.dataset.id); return; }
+            if (e.target.closest && e.target.closest('a[href]')) return;          // links open normally
+            if (e.target.closest && e.target.closest('.bfc-pin-btn')) { pinBar.classList.toggle('bfc-open'); if (pinBar.classList.contains('bfc-open')) fetchPins(false, 5000); return; }
+            const item = e.target.closest && e.target.closest('.bfc-pin-item');
+            if (item) {
+                const pin = pinsState.pins.find(p => p.id === item.dataset.id);
+                if (pin) selectPin(pin);
+            }
+        });
+        container.appendChild(pinBar);
+        renderPinBar();
+    }
+
+    // Turn plain text into text + clickable links (same target="_blank" the script's other links use).
+    function appendLinkified(parent, text) {
+        const re = /https?:\/\/[^\s<>"']+/gi;
+        let last = 0, m;
+        while ((m = re.exec(text))) {
+            let url = m[0].replace(/[),.;!?]+$/, '');
+            if (m.index > last) parent.appendChild(document.createTextNode(text.slice(last, m.index)));
+            const a = document.createElement('a');
+            a.href = url; a.target = '_blank'; a.rel = 'noopener noreferrer'; a.textContent = url;
+            parent.appendChild(a);
+            last = m.index + url.length;
+            re.lastIndex = last;
+        }
+        if (last < text.length) parent.appendChild(document.createTextNode(text.slice(last)));
+    }
+
+    function renderPinBar() {
+        markPinnedMessages();
+        if (!pinBar) return;
+        const pins = pinsConfigured() ? pinsState.pins : [];
+        pinBar.classList.toggle('bfc-has', pins.length > 0);
+        const wasOpen = pinBar.classList.contains('bfc-open');
+        pinBar.textContent = '';
+        if (!pins.length) { pinBar.classList.remove('bfc-open'); return; }
+        const mk = (tag, cls, text) => { const n = document.createElement(tag); if (cls) n.className = cls; if (text != null) n.textContent = text; return n; };
+        const btn = mk('button', 'bfc-pin-btn', '📌'); btn.type = 'button'; btn.title = 'Pinned messages';
+        btn.appendChild(mk('span', 'bfc-pin-count', String(pins.length)));
+        pinBar.appendChild(btn);
+        const panel = mk('div', 'bfc-pin-panel');
+        pins.slice().reverse().forEach(p => {
+            const row = mk('div', 'bfc-pin-item' + (pinsState.sel === p.id ? ' bfc-pin-sel' : '')); row.dataset.id = p.id;
+            const col = mk('div', 'bfc-pin-body');
+            const txt = mk('div'); appendLinkified(txt, p.text); col.appendChild(txt);
+            const by = [p.author ? `from ${p.author}` : '', p.clock ? `at ${p.clock}` : '', p.by ? `pinned by ${p.by}` : ''].filter(Boolean).join(' · ');
+            if (by) col.appendChild(mk('div', 'bfc-pin-by', by));
+            if (pinsState.sel === p.id) col.appendChild(mk('div', 'bfc-pin-when', `🕒 Sent ${fmtSent(p)}`));
+            const x = mk('button', 'bfc-pin-x', '✕'); x.type = 'button'; x.dataset.id = p.id; x.title = 'Unpin';
+            row.append(col, x);
+            panel.appendChild(row);
+        });
+        pinBar.appendChild(panel);
+        pinBar.classList.toggle('bfc-open', wasOpen);
+    }
+
+    // 📌 in the top-left corner of every message that is currently pinned.
+    function markPinned(msgEl) {
+        const pin = pinsConfigured() ? pinFor(msgEl) : null;
+        msgEl.classList.toggle('bfc-is-pinned', !!pin);
+        let badge = msgEl.querySelector(':scope > .bfc-pin-badge');
+        if (pin && !badge) {
+            badge = document.createElement('span');
+            badge.className = 'bfc-pin-badge';
+            badge.textContent = '📌';
+            badge.title = 'Pinned - tap to unpin';
+            badge.addEventListener('click', e => {
+                e.preventDefault(); e.stopPropagation();
+                const cur = pinFor(msgEl);
+                if (cur) unpinMessage(cur.id);
+            });
+            msgEl.appendChild(badge);
+        } else if (!pin && badge) badge.remove();
+    }
+    function markPinnedMessages() {
+        if (!chatBoxEl) return;
+        chatBoxEl.querySelectorAll('.bfc-msg-container').forEach(markPinned);
+    }
+
+    // Tap a pin in the panel: no scrolling. The pin is highlighted with the exact time it was sent, and if that
+    // message is currently loaded in the chat it gets a brief outline where it is.
+    function fmtSent(pin) {
+        if (pin.time) {
+            const d = new Date(pin.time * 1000), p2 = n => String(n).padStart(2, '0');
+            return `${p2(d.getUTCHours())}:${p2(d.getUTCMinutes())}:${p2(d.getUTCSeconds())} - ${p2(d.getUTCDate())}/${p2(d.getUTCMonth() + 1)}/${String(d.getUTCFullYear()).slice(2)} TCT`;
+        }
+        return pin.clock ? `${pin.clock} TCT` : 'time unknown';
+    }
+    function selectPin(pin) {
+        pinsState.sel = pinsState.sel === pin.id ? '' : pin.id;      // tap again to un-highlight
+        renderPinBar();
+        if (!pinsState.sel || !chatBoxEl) return;
+        chatBoxEl.querySelectorAll('.bfc-msg-container').forEach(m => {
+            if (!msgMatchesPin(m, pin)) return;
+            m.classList.add('bfc-jump-outline');
+            setTimeout(() => m.classList.remove('bfc-jump-outline'), 2500);
+        });
+    }
+
+    // Opening a link from the chat closes the faction chat box so the page is not covered.
+    function collapseChatBox() {
+        if (!chatBoxEl) return;
+        const head = chatBoxEl.querySelector('[class*="chat-box-head"], [class*="chatBoxHead"], [class*="header___"], [class*="head___"], [class*="Header"]');
+        if (head) head.click();
+    }
+    document.addEventListener('click', e => {
+        if (!CFG.closeChatOnLink || !chatBoxEl) return;
+        const a = e.target.closest && e.target.closest('a[href]');
+        if (!a || !chatBoxEl.contains(a)) return;
+        if (a.closest('#bfc-panel, #bfc-toolbar, #bfc-notify-bar')) return;
+        if (!/^https?:/i.test(a.href)) return;
+        setTimeout(collapseChatBox, 350);
+    }, true);
+
+    function startPins() {
+        loadPinsCache();                                        // show the last known pins immediately
+        renderPinBar();
+        const go = async () => {
+            if (!CFG.factionId && CFG.apiKey) { try { await fetchFactionIdentity(); } catch (_) {} loadPinsCache(); }
+            fetchPins(false);
+        };
+        go();                                                   // no artificial delay any more
+        setInterval(() => { if (!document.hidden) fetchPins(false, 20000); }, 60000);
+        // Refresh as soon as you come back to the page / chat.
+        document.addEventListener('visibilitychange', () => { if (!document.hidden) fetchPins(false, 10000); });
+        window.addEventListener('focus', () => fetchPins(false, 10000));
+    }
+
     function buildNotifyBar(container) {
         if (container.querySelector('#bfc-notify-bar')) { notifyBar = container.querySelector('#bfc-notify-bar'); return; }
         notifyBar = document.createElement('div');
@@ -1332,7 +1760,8 @@
     function trimSlash(url) { return String(url || '').trim().replace(/\/+$/, ''); }
     function isHttpUrl(url) { return /^https?:\/\/[^\s]+$/i.test(url); }
 
-    function rxHttp(method, url, body) {
+    function rxHttp(method, url, body, timeoutMs) {
+        timeoutMs = timeoutMs || 8000;
         const data = body ? JSON.stringify(body) : undefined;
         const headers = data ? { 'Content-Type': 'application/json' } : {};
         const parse = (status, text) => {
@@ -1344,7 +1773,7 @@
         if (typeof GM_xmlhttpRequest === 'function') {
             return new Promise((resolve, reject) => {
                 GM_xmlhttpRequest({
-                    method, url, data, headers, timeout: 8000,
+                    method, url, data, headers, timeout: timeoutMs,
                     onload: r => { try { resolve(parse(r.status, r.responseText)); } catch (e) { reject(e); } },
                     onerror: () => reject(new Error('network error')),
                     ontimeout: () => reject(new Error('timed out')),
@@ -1358,7 +1787,7 @@
             return withRequestTimeout(PDA_httpGet(url, {})).then(r => parse(Number(r.status), r.responseText));
         }
         const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), 8000);
+        const timer = setTimeout(() => controller.abort(), timeoutMs);
         return fetch(url, { method, body: data, headers, signal: controller.signal })
             .then(async r => parse(r.status, await r.text()))
             .finally(() => clearTimeout(timer));
@@ -1755,6 +2184,44 @@
         toastTimer = setTimeout(() => toast.remove(), 8000);
     }
 
+    // ===== "+" in the quick-react bar: pick ANY emoji (like Messenger), remembers your recent ones =====
+    const EMOJI_SETS = [
+        ['Smileys', '😀😃😄😁😆😅😂🤣😊😇🙂😉😍🥰😘😋😛😜🤪😎🤩🥳😏😒😞😔😟😕🙁😣😖😫😩🥺😢😭😤😠😡🤬🤯😳🥵🥶😱😨😰😥😓🤗🤔🤭🤫😶😐😑😬🙄😯😦😧😮😲🥱😴🤤😪😵🤐🥴🤢🤮🤧😷🤒🤕'],
+        ['Hands', '👍👎👌✌️🤞🤟🤘🤙👈👉👆👇☝️👋🤚🖐️✋🖖👏🙌👐🤲🤝🙏💪'],
+        ['Hearts & symbols', '❤️🧡💛💚💙💜🖤🤍💔❣️💕💞💓💗💖💘💯✨⭐🌟💥🔥💫🎉🎊✅❌❓❗‼️💢💤'],
+        ['More', '💰💵💎🏆🥇👑🎯⚔️🔫💣🛡️💊💉🏥✈️🚀🔔📌🍺🍕🍔☕🎮🎲🍀🌈☠️💀👀🧠'],
+    ];
+    const RECENT_KEY = 'bfc_recent_emojis_v1';
+    const splitEmojis = str => (typeof Intl !== 'undefined' && Intl.Segmenter)
+        ? Array.from(new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(str), x => x.segment)
+        : Array.from(str);
+    const getRecentEmojis = () => { try { const a = JSON.parse(localStorage.getItem(RECENT_KEY) || '[]'); return Array.isArray(a) ? a.slice(0, 14) : []; } catch (_) { return []; } };
+    const addRecentEmoji = e => { try { localStorage.setItem(RECENT_KEY, JSON.stringify([e, ...getRecentEmojis().filter(x => x !== e)].slice(0, 14))); } catch (_) {} };
+
+    function openEmojiPicker(msgEl, anchor) {
+        if (!openSheet('emoji', anchor)) return;
+        const pickEmoji = emoji => {
+            addRecentEmoji(emoji);
+            sheetEl.classList.remove('bfc-open');
+            toggleReaction(msgEl, emoji, anchor);
+        };
+        const addGrid = (label, emojis) => {
+            if (!emojis.length) return;
+            const lb = document.createElement('div'); lb.className = 'bfc-emo-lbl'; lb.textContent = label;
+            const grid = document.createElement('div'); grid.className = 'bfc-emo-grid';
+            emojis.forEach(e => {
+                const b = document.createElement('button'); b.type = 'button'; b.textContent = e;
+                b.addEventListener('click', ev => { ev.preventDefault(); ev.stopPropagation(); pickEmoji(e); });
+                grid.appendChild(b);
+            });
+            sheetEl.append(lb, grid);
+        };
+        sheetEl.innerHTML = '';
+        addGrid('Recent', getRecentEmojis());
+        EMOJI_SETS.forEach(([label, str]) => addGrid(label, splitEmojis(str)));
+        sheetEl._place && sheetEl._place();
+    }
+
     function injectQuickReact(msgEl) {
         const existing = msgEl.querySelector(':scope > .bfc-qr');
         if (!CFG.reactionsEnabled || !CFG.quickReactEnabled || !CFG.quickReactions.length || !msgEl.dataset.bfcKey) {
@@ -1782,6 +2249,16 @@
             });
             bar.appendChild(b);
         });
+        const plus = document.createElement('button');
+        plus.type = 'button'; plus.className = 'bfc-qr-btn bfc-qr-plus'; plus.textContent = '+'; plus.title = 'More emojis';
+        plus.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); openEmojiPicker(msgEl, plus); });
+        bar.appendChild(plus);
+        if (pinsConfigured()) {
+            const pb = document.createElement('button');
+            pb.type = 'button'; pb.className = 'bfc-qr-btn'; pb.textContent = '📌'; pb.title = 'Pin / unpin this message';
+            pb.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); pinMessage(msgEl); });
+            bar.appendChild(pb);
+        }
         msgEl.appendChild(bar);
 
         // Touch devices have no hover: DOUBLE-tapping a message toggles its quick-react bar.
@@ -1988,7 +2465,12 @@
         gifBtn.title = 'Search Klipy and send a GIF';
         gifBtn.addEventListener('click', () => openGifPicker());
 
-        left.append(scrollBtn, searchBtn, memberBtn, tagsBtn, imgBtn, gifBtn);
+        const bankBtn = mkBtn('🏦 Bank');
+        bankBtn.id = 'bfc-bank-btn';
+        bankBtn.title = 'Request a faction vault withdrawal';
+        bankBtn.addEventListener('click', () => startBankCommand());
+
+        left.append(scrollBtn, searchBtn, memberBtn, tagsBtn, imgBtn, gifBtn, bankBtn);
         right.append(statusPill);
         toolbar.append(left, right);
         container.appendChild(toolbar);
@@ -2601,7 +3083,21 @@
         fr.src = url;
         win.append(bar, fr);
         ov.appendChild(win);
-        const close = () => { fr.src = 'about:blank'; ov.remove(); document.removeEventListener('keydown', onKey, true); };
+        // The page inside the mini browser brings its own Torn chat boxes + chat tab bar. Hide them there
+        // (the iframe is the same site, so we can add a style rule to it). Re-checked in case the page reloads.
+        const hideChatInFrame = () => {
+            try {
+                const d = fr.contentDocument;
+                if (!d || !d.head || d.getElementById('bfc-mb-nochat')) return;
+                const st = d.createElement('style');
+                st.id = 'bfc-mb-nochat';
+                st.textContent = '#chatRoot, #chat-root, [class*="chat-app___"], [class*="chat-box___"] { display:none !important; }';
+                d.head.appendChild(st);
+            } catch (_) {}
+        };
+        const frameTimer = setInterval(hideChatInFrame, 250);
+        fr.addEventListener('load', hideChatInFrame);
+        const close = () => { clearInterval(frameTimer); fr.src = 'about:blank'; ov.remove(); document.removeEventListener('keydown', onKey, true); };
         const onKey = e => { if (e.key === 'Escape') close(); };
         x.addEventListener('click', close);
         ext.addEventListener('click', () => { close(); window.location.href = url; });
@@ -3479,6 +3975,7 @@
             decorateMsg(msgEl);
             renderReactions(msgEl);
             renderImages(msgEl);
+            markPinned(msgEl);
             return false;
         }
         msgEl.dataset.bfcDone = '1';
@@ -3504,6 +4001,7 @@
         checkMention(msgEl, fp, isNew, fullText);
         renderReactions(msgEl);
         renderImages(msgEl);
+        markPinned(msgEl);
 
         const bodyText = messageText(bodyEl || msgEl, msgEl, true).toLowerCase();
         processedMsgs.push({ el: msgEl, bodyText, fullText: fullText.toLowerCase() });
@@ -3699,7 +4197,7 @@
 
     function setChatToolsVisible(box, visible) {
         if (!box) return;
-        box.querySelectorAll('#bfc-notify-bar, #bfc-toolbar, #bfc-search-bar, #bfc-mention-popup')
+        box.querySelectorAll('#bfc-notify-bar, #bfc-pin-bar, #bfc-toolbar, #bfc-search-bar, #bfc-mention-popup')
             .forEach(element => element.classList.toggle('bfc-chat-hidden', !visible));
         if (visible) return;
         memberPopup?.classList.remove('bfc-open');
@@ -3792,6 +4290,7 @@
         }
 
         buildNotifyBar(chatBoxEl);
+        buildPinBar(chatBoxEl);
         buildToolbar(chatBoxEl);
         buildSearchBar(chatBoxEl);
         setupMentionAutocomplete(chatBoxEl);
@@ -3918,6 +4417,19 @@
                     <label class="bfc-sw"><input type="checkbox" id="s-men"${CFG.mentionEnabled?' checked':''}><span class="bfc-swt"></span></label>
                 </div>
                 <p class="bfc-mention-note">Only detects mentions while faction chat is open. Deduplication prevents re-triggers on scroll or chat reopen.</p>
+
+                <hr class="bfc-div">
+                <span class="bfc-slbl">Pinned comments</span>
+                <div class="bfc-fld">
+                    <label class="bfc-lbl">Pins server address (leave blank to use the built-in one)</label>
+                    <input class="bfc-inp" type="url" id="s-pinsurl" placeholder="https://bfc-pins.bagobo101.workers.dev" value="${esc(CFG.pinsUrl || '')}">
+                </div>
+                <p class="bfc-mention-note">Pins are shared automatically with your whole faction. This needs your API key (with faction access) so the script can find your faction.</p>
+
+                <div class="bfc-row">
+                    <span>🔗 Close the chat when I open a link</span>
+                    <label class="bfc-sw"><input type="checkbox" id="s-closelink"${CFG.closeChatOnLink?' checked':''}><span class="bfc-swt"></span></label>
+                </div>
 
                 <hr class="bfc-div">
                 <span class="bfc-slbl">Reactions</span>
@@ -4102,6 +4614,13 @@
             CFG.quickReactions  = parseQuickReactions(document.getElementById('s-qre').value, DEFAULTS.quickReactions);
             CFG.reactionNotify  = document.getElementById('s-rxn').checked;
             CFG.reactionsEnabled = document.getElementById('s-rxon').checked;
+            CFG.pinsUrl         = (document.getElementById('s-pinsurl').value || '').trim();
+            CFG.closeChatOnLink = document.getElementById('s-closelink').checked;
+            setTimeout(async () => {
+                if (!CFG.factionId && CFG.apiKey) { try { await fetchFactionIdentity(); } catch (_) {} }
+                if (pinsConfigured()) fetchPins(true);
+                else updatePill('Pins need an API key with faction access to find your faction', true);
+            }, 400);
             CFG.imagePreviews   = document.getElementById('s-imgon').checked;
             CFG.imageAnyHost    = document.getElementById('s-imgany').checked;
             CFG.imageAutoSend   = document.getElementById('s-imgsend').checked;
@@ -4185,6 +4704,7 @@
         try {
             showStartupIndicator(`BFC v${BFC_VERSION} loaded`);
             if (isMobile()) document.body.classList.add('bfc-pda');
+        startPins();
         if (CFG.apiKey) fetchMyUsername();
         buildSettingsPanel();
         runScanner();
