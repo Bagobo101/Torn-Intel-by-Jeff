@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Better Faction Chat – Torn.com (Desktop + Torn PDA)
 // @namespace    https://torn.com/
-// @version      2.21.1
+// @version      2.23.0
 // @description  Desktop and Torn PDA faction chat tools: status, group tags, officer groups, search, timestamps, reactions, image uploads, GIFs and touch-friendly controls
 // @author       sercann
 // @match        https://www.torn.com/*
@@ -32,7 +32,7 @@
     // The thread mini-browser loads a Torn page in an iframe; don't start a second copy of BFC in it.
     try { if (window.top !== window.self) return; } catch (_) { return; }
 
-    const BFC_VERSION = '2.21.1';
+    const BFC_VERSION = '2.23.0';
     const STORE_KEY   = 'bfc_settings_v2';
     const API_BASE    = 'https://api.torn.com';
     const PDA_KEY     = '###PDA-APIKEY###';
@@ -52,12 +52,17 @@
         showRankIcons:    true,
         autoScroll:       true,
         mentionEnabled:   true,
+        everyoneLiteral:  true,    // the Everyone tag inserts @everyone instead of every member's name
         hideGearBtn:      false,
         replyButton:      IS_TORN_PDA,
         quickReactEnabled: true,
         quickReactions:   ['👍', '😂', '❤️', '🔥'],
         reactionNotify:   true,
         reactionsEnabled: true,
+        toolbarOrder:     [],      // toolbar button order (empty = default)
+        toolbarHidden:    [],      // toolbar buttons the user hid
+        toolbarLabels:    'auto',  // 'auto' | 'icons' | 'text'
+        toolbarScale:     0,       // toolbar button size in % (0 = automatic: 135% on PC, touch sizes on phones)
         pinsUrl:          '',      // pins server address (Cloudflare Worker)
         closeChatOnLink:  true,    // collapse the faction chat when a link in it is opened
         imagePreviews:    true,
@@ -222,6 +227,13 @@
         .bfc-nav-btn:hover { background:rgba(255,255,255,.35); }
 
         .bfc-chat-hidden { display:none!important; }
+        #bfc-toolbar.bfc-tb-icons .bfc-tb-lbl { display:none!important; }
+        #bfc-toolbar.bfc-tb-labels .bfc-tb-lbl { display:inline!important; }
+        .bfc-tbrow { display:flex; align-items:center; gap:8px; padding:6px 0; border-bottom:1px solid #21262d; }
+        .bfc-tbrow label { flex:1; display:flex; align-items:center; gap:8px; cursor:pointer; }
+        .bfc-tbrow input[type=checkbox] { width:18px; height:18px; }
+        .bfc-tbrow button { background:#161b22; border:1px solid #30363d; color:#cdd9e5; border-radius:6px; width:34px; height:30px; font-size:14px; cursor:pointer; }
+        .bfc-tbrow button:disabled { opacity:.35; cursor:default; }
         #bfc-pin-bar { display:none; position:absolute; right:8px; top:48px; z-index:7; }
         #bfc-pin-bar.bfc-has { display:block; }
         #bfc-pin-bar .bfc-pin-btn { position:relative; width:38px; height:38px; border-radius:50%; border:1px solid #8a6d1d; background:#2a2108; color:#f2cc60; font-size:18px; line-height:1; cursor:pointer; box-shadow:0 2px 8px rgba(0,0,0,.5); display:flex; align-items:center; justify-content:center; margin-left:auto; padding:0; }
@@ -1164,6 +1176,13 @@
         return true;
     }
 
+    // What a group tag turns into when inserted. "Everyone" can be the single word @everyone.
+    function groupMentionText(key) {
+        if (key === 'everyone' && CFG.everyoneLiteral !== false) return '@everyone ';
+        const names = getGroupMembers(key);
+        return names.length ? names.map(n => '@' + n).join(' ') : null;
+    }
+
     function applyMention(name) {
         if (!currentMentionState) return;
         const state = currentMentionState;
@@ -1171,13 +1190,12 @@
 
         if (isGroupToken(name)) {
             const key = groupKeyFromToken(name);
-            const names = getGroupMembers(key);
-            if (!names.length) {
+            mentionText = groupMentionText(key);
+            if (!mentionText) {
                 updatePill(`No ${key} members found`, true);
                 closeMentionSuggest();
                 return;
             }
-            mentionText = names.map(memberName => '@' + memberName).join(' ');
         } else {
             mentionText = '@' + name;
         }
@@ -2387,9 +2405,9 @@
         }).join('');
         tagPopup.querySelectorAll('.bfc-tag-item').forEach(btn => btn.addEventListener('click', () => {
             const key = btn.dataset.group;
-            const names = getGroupMembers(key);
-            if (!names.length) { updatePill(`No ${key} members found`, true); return; }
-            insertTextIntoChat(names.map(n => '@' + n).join(' '));
+            const text = groupMentionText(key);
+            if (!text) { updatePill(`No ${key} members found`, true); return; }
+            insertTextIntoChat(text);
             tagPopup.classList.remove('bfc-open');
         }));
 
@@ -2472,9 +2490,82 @@
         bankBtn.addEventListener('click', () => startBankCommand());
 
         left.append(scrollBtn, searchBtn, memberBtn, tagsBtn, imgBtn, gifBtn, bankBtn);
+        tbButtons = { scroll: scrollBtn, search: searchBtn, members: memberBtn, tags: tagsBtn, image: imgBtn, gif: gifBtn, bank: bankBtn };
         right.append(statusPill);
         toolbar.append(left, right);
         container.appendChild(toolbar);
+        applyToolbarLayout();
+    }
+
+    // ===== Toolbar button customization (show/hide, order, text) =====
+    const TB_DEFS = [['scroll', '⏬', 'Scroll'], ['search', '🔍', 'Search'], ['members', '👥', 'Members'], ['tags', '📣', 'Tags'],
+                     ['image', '📷', 'Image'], ['gif', '🎞', 'GIF'], ['bank', '🏦', 'Bank']];
+    let tbButtons = {};
+    function tbOrderList() {
+        const keys = TB_DEFS.map(d => d[0]);
+        const out = (Array.isArray(CFG.toolbarOrder) ? CFG.toolbarOrder : []).filter(k => keys.includes(k));
+        keys.forEach(k => { if (!out.includes(k)) out.push(k); });
+        return out;
+    }
+    function applyToolbarLayout() {
+        const hidden = Array.isArray(CFG.toolbarHidden) ? CFG.toolbarHidden : [];
+        tbOrderList().forEach((k, i) => {
+            const el = tbButtons[k];
+            if (!el) return;
+            el.style.order = String(i);
+            el.style.display = hidden.includes(k) ? 'none' : '';
+        });
+        const tb = toolbar || document.getElementById('bfc-toolbar');
+        if (tb) {
+            tb.classList.toggle('bfc-tb-icons', CFG.toolbarLabels === 'icons');
+            tb.classList.toggle('bfc-tb-labels', CFG.toolbarLabels === 'text');
+        }
+    }
+    // Toolbar button size: 100% = the base size (11px text). 0 = automatic (the built-in PC / phone sizes).
+    function applyToolbarSize() {
+        let st = document.getElementById('bfc-tb-size');
+        if (!st) { st = document.createElement('style'); st.id = 'bfc-tb-size'; (document.head || document.documentElement).appendChild(st); }
+        const pct = Number(CFG.toolbarScale) || 0;
+        if (pct < 40 || pct > 250) { st.textContent = ''; return; }
+        const k = pct / 100, r = n => (Math.round(n * k * 100) / 100) + 'px';
+        st.textContent = `
+            #bfc-toolbar { gap:${r(5)}!important; padding:${r(6)} ${r(8)}!important; }
+            #bfc-toolbar .bfc-tb-group { gap:${r(4)}!important; }
+            #bfc-toolbar .bfc-tb-btn { font-size:${r(11)}!important; padding:${r(3)} ${r(6)}!important; border-radius:${r(4)}!important; min-height:${r(22)}!important; min-width:${r(22)}!important; line-height:1.2!important; }
+            #bfc-toolbar #bfc-status-pill { font-size:${r(11)}!important; padding:${r(2)} ${r(6)}!important; border-radius:${r(4)}!important; min-height:0!important; }`;
+    }
+
+    function renderTbSettings(box) {
+        box.textContent = '';
+        const order = tbOrderList();
+        const hidden = new Set(Array.isArray(CFG.toolbarHidden) ? CFG.toolbarHidden : []);
+        const commit = () => { saveCfg(CFG); applyToolbarLayout(); renderTbSettings(box); };
+        order.forEach((k, i) => {
+            const def = TB_DEFS.find(d => d[0] === k);
+            const row = document.createElement('div'); row.className = 'bfc-tbrow';
+            const lab = document.createElement('label');
+            const cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = !hidden.has(k);
+            cb.addEventListener('change', () => {
+                const cur = new Set(Array.isArray(CFG.toolbarHidden) ? CFG.toolbarHidden : []);
+                if (cb.checked) cur.delete(k); else cur.add(k);
+                CFG.toolbarHidden = Array.from(cur);
+                saveCfg(CFG); applyToolbarLayout();
+            });
+            lab.append(cb, document.createTextNode(`${def[1]} ${def[2]}`));
+            const mv = (txt, dir, off) => {
+                const b = document.createElement('button'); b.type = 'button'; b.textContent = txt; b.disabled = off;
+                b.title = dir < 0 ? 'Move left' : 'Move right';
+                b.addEventListener('click', () => {
+                    const o = tbOrderList(), j = o.indexOf(k) + dir;
+                    if (j < 0 || j >= o.length) return;
+                    [o[j], o[j - dir]] = [o[j - dir], o[j]];
+                    CFG.toolbarOrder = o; commit();
+                });
+                return b;
+            };
+            row.append(lab, mv('▲', -1, i === 0), mv('▼', 1, i === order.length - 1));
+            box.appendChild(row);
+        });
     }
 
     function mkBtn(text, cls) {
@@ -4418,6 +4509,35 @@
                     <label class="bfc-sw"><input type="checkbox" id="s-men"${CFG.mentionEnabled?' checked':''}><span class="bfc-swt"></span></label>
                 </div>
                 <p class="bfc-mention-note">Only detects mentions while faction chat is open. Deduplication prevents re-triggers on scroll or chat reopen.</p>
+                <div class="bfc-row">
+                    <span>📣 Everyone tag inserts @everyone</span>
+                    <label class="bfc-sw"><input type="checkbox" id="s-everyone"${CFG.everyoneLiteral !== false?' checked':''}><span class="bfc-swt"></span></label>
+                </div>
+                <p class="bfc-mention-note">On: one @everyone. Off: every member's name, one by one (this is what pings people who don't use this script).</p>
+
+                <hr class="bfc-div">
+                <span class="bfc-slbl">Toolbar buttons</span>
+                <p class="bfc-mention-note">Tick the buttons you want to see and use the arrows to change their order. Changes apply right away.</p>
+                <div id="s-tbl"></div>
+                <div class="bfc-fld">
+                    <label class="bfc-lbl">Button text</label>
+                    <select class="bfc-inp" id="s-tblabels">
+                        <option value="auto"${(CFG.toolbarLabels || 'auto') === 'auto' ? ' selected' : ''}>Automatic (names on desktop, icons on phones)</option>
+                        <option value="icons"${CFG.toolbarLabels === 'icons' ? ' selected' : ''}>Icons only</option>
+                        <option value="text"${CFG.toolbarLabels === 'text' ? ' selected' : ''}>Icons and names</option>
+                    </select>
+                </div>
+                <div class="bfc-fld">
+                    <label class="bfc-lbl">Button size: <b id="s-tbsize-val">${Number(CFG.toolbarScale) ? Number(CFG.toolbarScale) + '%' : 'Automatic'}</b></label>
+                    <input type="range" id="s-tbsize" min="50" max="200" step="5" value="${Number(CFG.toolbarScale) || 100}" style="width:100%">
+                    <div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap">
+                        <button type="button" class="bfc-sh-btn" data-size="70" style="background:#30363d;margin:0">Small</button>
+                        <button type="button" class="bfc-sh-btn" data-size="100" style="background:#30363d;margin:0">Normal</button>
+                        <button type="button" class="bfc-sh-btn" data-size="135" style="background:#30363d;margin:0">Large</button>
+                        <button type="button" class="bfc-sh-btn" data-size="0" style="background:#30363d;margin:0">Automatic</button>
+                    </div>
+                </div>
+                <button type="button" id="s-tbreset" class="bfc-sh-btn" style="background:#30363d">Reset buttons</button>
 
                 <hr class="bfc-div">
                 <span class="bfc-slbl">Pinned comments</span>
@@ -4554,6 +4674,24 @@
             else officerDraftIds.delete(id);
         });
 
+        const tbBox = document.getElementById('s-tbl');
+        renderTbSettings(tbBox);
+        const sizeIn = document.getElementById('s-tbsize'), sizeVal = document.getElementById('s-tbsize-val');
+        const setSize = pct => {
+            CFG.toolbarScale = pct; saveCfg(CFG); applyToolbarSize();
+            sizeVal.textContent = pct ? pct + '%' : 'Automatic';
+            if (pct) sizeIn.value = pct;
+        };
+        sizeIn.addEventListener('input', () => setSize(Number(sizeIn.value)));
+        panel.querySelectorAll('[data-size]').forEach(b => b.addEventListener('click', () => setSize(Number(b.dataset.size))));
+        document.getElementById('s-tblabels').addEventListener('change', e => { CFG.toolbarLabels = e.target.value; saveCfg(CFG); applyToolbarLayout(); });
+        document.getElementById('s-tbreset').addEventListener('click', () => {
+            CFG.toolbarOrder = []; CFG.toolbarHidden = []; CFG.toolbarLabels = 'auto'; CFG.toolbarScale = 0;
+            sizeVal.textContent = 'Automatic'; sizeIn.value = 100; applyToolbarSize();
+            document.getElementById('s-tblabels').value = 'auto';
+            saveCfg(CFG); applyToolbarLayout(); renderTbSettings(tbBox);
+        });
+
         gearBtn.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); panel.classList.toggle('bfc-open'); });
         panel.addEventListener('click', e => e.stopPropagation());
         document.getElementById('bfc-panel-close').addEventListener('click', () => panel.classList.remove('bfc-open'));
@@ -4602,6 +4740,7 @@
             CFG.apiKey          = document.getElementById('s-key').value.trim();
             CFG.refreshInterval = Math.max(30, parseInt(document.getElementById('s-ref').value) || 60);
             CFG.mentionEnabled  = document.getElementById('s-men').checked;
+            CFG.everyoneLiteral = document.getElementById('s-everyone').checked;
             CFG.showTimestamps  = document.getElementById('s-ts').checked;
             CFG.showTravelIcons = document.getElementById('s-travel').checked;
             CFG.showRankIcons   = document.getElementById('s-rank').checked;
@@ -4705,6 +4844,7 @@
         try {
             showStartupIndicator(`BFC v${BFC_VERSION} loaded`);
             if (isMobile()) document.body.classList.add('bfc-pda');
+        applyToolbarSize();
         startPins();
         if (CFG.apiKey) fetchMyUsername();
         buildSettingsPanel();
